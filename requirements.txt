@@ -1,0 +1,8 @@
+google-genai
+google-adk
+gradio
+pillow
+numpy
+requests
+python-dotenv
+kaggle

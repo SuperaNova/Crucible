@@ -1,0 +1,25 @@
+# Environment
+.env
+
+# Dataset and generated data
+data/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Gradio temp files
+gradio_cached_examples/
+flagged/
