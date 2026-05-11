@@ -1,8 +1,8 @@
-# The Crucible — A Multi-Agent ADK Orchestration for RPG Sprite Synthesis
+# The Crucible — A Hybrid VAE-LLM Multi-Agent Pipeline for RPG Sprite Synthesis
 
-An autonomous intelligence pipeline that replaces conventional sequential processing with a **Google ADK-driven** multi-agent system. A vision-augmented Appraiser performs zero-shot semantic extraction of sprite features, delegating creative reasoning to a Master Smith agent via shared session-state memory. The resulting high-entropy prompt is decoded into a 16-bit artifact using a CLIP-aligned generative backend and a custom pixel-lattice post-processing layer.
+An autonomous intelligence pipeline combining a **Vision-Encoder-Decoder (BLIP)** for local sprite appraisal with a **Google ADK-driven** LLM for creative synthesis. The BLIP model encodes each sprite into a latent visual representation and decodes it into a natural language caption, which is then handed off to the Master Smith LLM agent via shared session-state memory. The resulting high-entropy prompt is decoded into a 16-bit artifact using a CLIP-aligned generative backend and a custom pixel-lattice post-processing layer.
 
-Built with the **Google Agent Development Kit (ADK)**.
+Built with **BLIP** (Salesforce Research, ICML 2022) and the **Google Agent Development Kit (ADK)**.
 
 ---
 
@@ -15,13 +15,16 @@ The system uses a Multi-Agent System (MAS) architecture where agents are autonom
      \            /
       v          v
   Agent 1 — The Appraiser
-  (LlmAgent, gemini-2.5-flash, vision)
-  Identifies both sprites and writes result to state['appraisal'].
+  (BLIP Vision-Encoder-Decoder, Salesforce/blip-image-captioning-base)
+  Encodes both sprites into latent visual features,
+  decodes them into natural language captions.
+  Writes result to state['appraisal'] (no API call — runs locally).
             |
             v
   Agent 2 — The Master Smith
-  (LlmAgent, gemini-2.5-flash, text only)
-  Reads {appraisal} from state, designs fusion, and writes to state['smithing'].
+  (LlmAgent, gemini-3.1-flash-lite-preview, text only)
+  Reads {appraisal} captions from state, designs fusion,
+  and writes to state['smithing'].
             |
             v
   Agent 3 — The Forger
@@ -30,8 +33,8 @@ The system uses a Multi-Agent System (MAS) architecture where agents are autonom
   Output: PIL.Image (512x512, 16-color pixel art)
 ```
 
-### Why ADK?
-By using the Google ADK, each agent is defined with its own instruction set and output schema (via Pydantic). The `SequentialAgent` orchestrator manages the flow, while the `Runner` handles session lifecycle and event streaming. This allows for clean separation between vision-based appraisal and text-based creative smithing.
+### Why BLIP + ADK?
+The Appraiser is now a **Vision-Encoder-Decoder** model — the same architectural family as Autoencoders and VAEs — running fully locally without API costs. BLIP encodes each sprite's visual content into a latent representation and decodes it into a descriptive caption. This caption is injected into the ADK session state, allowing the Master Smith LLM to reason about the sprites without ever seeing the raw pixels. The Google ADK `SequentialAgent` orchestrator then manages the remaining flow.
 
 ---
 
@@ -86,7 +89,8 @@ Open http://localhost:7860 in your browser.
 | `app.py` | Gradio Blocks UI (entry point) |
 | `setup.py` | One-time dataset download and preparation |
 | `crucible/forge.py` | Orchestrator class and Forger pipeline |
-| `crucible/agents.py` | ADK Agent definitions (Appraiser, Master Smith) |
+| `crucible/agents.py` | ADK Agent definitions (Master Smith) |
+| `crucible/autoencoder_appraiser.py` | BLIP Vision-Encoder-Decoder Appraiser |
 | `crucible/schemas.py` | Pydantic schemas for agent communication |
 | `crucible/smelter.py` | Data cleaning heuristics |
 | `notebooks/` | Archive of original research/colab versions |
@@ -111,11 +115,16 @@ L = E[log p(x|z)] - KL( q(z|x) || p(z) )
 
 Points between **z_a** and **z_b** on the learned manifold are more likely to decode into coherent images than random interpolations in pixel space.
 
-### Why this project uses prompt-based fusion instead
+### Why this project uses BLIP for appraisal instead of a pixel-space VAE
 
-The `sprites.npy` dataset has approximately 7,000 items after cleaning — too few to train a VAE whose latent manifold generalizes reliably across item categories. At this scale, the reconstruction loss dominates and the KL term collapses, producing a posterior that memorizes rather than generalizes. The resulting latent space is not smooth enough for meaningful interpolation.
+The `sprites.npy` dataset has approximately 7,000 items after cleaning — too few to train a VAE whose latent manifold generalizes reliably across item categories. At this scale, the reconstruction loss dominates and the KL term collapses, producing a posterior that memorizes rather than generalizes.
 
-The three-agent pipeline sidesteps this by treating the fusion as a language grounding problem: Gemini identifies semantic properties of each sprite (material, element, visual style) and the Master Smith recombines them in prompt space. Pollinations then acts as the generative decoder, leveraging a much larger prior trained on billions of images.
+Instead, we use **BLIP** (*Bootstrapping Language-Image Pre-training*, Li et al., ICML 2022) as the Appraiser. BLIP is a **Vision-Encoder-Decoder** model — architecturally equivalent to an image-conditioned Autoencoder — where:
+
+- The **Encoder** (Vision Transformer, ViT-B/16) maps the input sprite to a dense latent representation `h = Encoder(x)`.
+- The **Decoder** (BERT-based language model) reconstructs the image's semantic content as natural language: `caption = Decoder(h)`.
+
+This gives us the core Encoder-Decoder principle but leverages a model pre-trained on 129 million image-text pairs, making it robust even to our small sprite dataset. The output caption is then passed to the Master Smith LLM, which acts as a learned generative prior over RPG item semantics — effectively replacing the VAE decoder with a much larger, text-conditioned generative model (Pollinations Flux).
 
 ---
 

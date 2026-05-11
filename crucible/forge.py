@@ -15,6 +15,7 @@ from google.genai import types
 from PIL import Image
 
 from .agents import PIXEL_ART_PREFIX, PIXEL_ART_SUFFIX, _pipeline
+from .autoencoder_appraiser import MoondreamAppraiser
 
 load_dotenv()
 
@@ -47,6 +48,10 @@ class Forge:
             )
         os.environ.setdefault("GOOGLE_API_KEY", api_key)
 
+        # Agent 1 — Moondream2 Vision-Language Model (local, pre-trained)
+        self._appraiser = MoondreamAppraiser()
+
+        # Agents 2+ — Google ADK pipeline (Master Smith → …)
         self._session_service = InMemorySessionService()
         self._runner = Runner(
             app_name=_APP_NAME,
@@ -59,24 +64,35 @@ class Forge:
         img_a = self._to_pil(sprite_a).resize((GEMINI_INPUT_SIZE, GEMINI_INPUT_SIZE), Image.NEAREST)
         img_b = self._to_pil(sprite_b).resize((GEMINI_INPUT_SIZE, GEMINI_INPUT_SIZE), Image.NEAREST)
 
+        # ------------------------------------------------------------------
+        # Stage 1 — BLIP Appraisal (Vision-Encoder-Decoder, runs locally)
+        # ------------------------------------------------------------------
+        print("[MoondreamAppraiser] Running ...")
+        appraisal = self._appraiser.appraise(img_a, img_b)
+        print(f"[MoondreamAppraiser] Item A: '{appraisal['item_a']}'  tags={appraisal['item_a_tags']}")
+        print(f"[MoondreamAppraiser] Item B: '{appraisal['item_b']}'  tags={appraisal['item_b_tags']}")
+
+        # ------------------------------------------------------------------
+        # Stage 2 — Master Smith (Google ADK LLM Agent)
+        # ------------------------------------------------------------------
         session_id = str(uuid.uuid4())
         self._run_async(self._session_service.create_session(
             app_name=_APP_NAME,
             user_id=_USER_ID,
             session_id=session_id,
-            state={"style_modifier": extra.strip() or "no special style"},
+            state={
+                "appraisal": appraisal,
+                "style_modifier": extra.strip() or "no special style",
+            },
         ))
 
+        # Master Smith reads from session state only — no image parts needed.
         message = types.Content(
             role="user",
-            parts=[
-                types.Part(text="Appraise these two RPG item sprites:"),
-                types.Part(inline_data=types.Blob(mime_type="image/png", data=self._pil_to_bytes(img_a))),
-                types.Part(inline_data=types.Blob(mime_type="image/png", data=self._pil_to_bytes(img_b))),
-            ],
+            parts=[types.Part(text="Design the fusion based on the appraisal in your context.")],
         )
 
-        print("[Appraiser] Running ...")
+        print("[Master Smith] Running ...")
         for event in self._runner.run(user_id=_USER_ID, session_id=session_id, new_message=message):
             if event.is_final_response() and event.content and event.content.parts:
                 author = getattr(event, "author", "agent")
@@ -86,10 +102,8 @@ class Forge:
             app_name=_APP_NAME, user_id=_USER_ID, session_id=session_id,
         ))
 
-        appraisal = _parse_state(session.state.get("appraisal"))
         smithing = _parse_state(session.state.get("smithing"))
 
-        print(f"[Appraiser]    Item A: {appraisal.get('item_a')} | Item B: {appraisal.get('item_b')}")
         print(f"[Master Smith] Fused:  {smithing.get('fused_name')}")
         print(f"[Master Smith] Reason: {smithing.get('reasoning')}")
 
@@ -99,6 +113,9 @@ class Forge:
         if PIXEL_ART_SUFFIX not in prompt:
             prompt = prompt.rstrip(", ") + ", " + PIXEL_ART_SUFFIX
 
+        # ------------------------------------------------------------------
+        # Stage 3 — Forger (Pollinations Flux + pixel art post-processing)
+        # ------------------------------------------------------------------
         forged = self._forge(prompt)
 
         preview_a = img_a.resize((UI_PREVIEW_SIZE, UI_PREVIEW_SIZE), Image.NEAREST)

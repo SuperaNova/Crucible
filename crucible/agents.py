@@ -1,9 +1,9 @@
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.genai import types
 
-from .schemas import AppraisalResult, SmithingResult
+from .schemas import SmithingResult
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.1-flash-lite-preview"
 
 PIXEL_ART_PREFIX = "pixel art sprite, 32x32 grid, RPG game item icon, "
 PIXEL_ART_SUFFIX = (
@@ -13,22 +13,19 @@ PIXEL_ART_SUFFIX = (
     "no photorealism, no painterly style"
 )
 
-_appraiser = LlmAgent(
-    name="appraiser",
-    model=MODEL,
-    instruction=(
-        "You are an expert RPG item cataloguer. You are shown two pixel art "
-        "item sprites from a retro RPG game. The FIRST image is Item A and "
-        "the SECOND image is Item B.\n\n"
-        "For each sprite identify:\n"
-        "  - item_a / item_b: short common name (e.g. 'iron sword')\n"
-        "  - item_a_tags / item_b_tags: 3 to 5 descriptive tags about "
-        "material, element, or visual style (e.g. ['metal', 'blue', 'flame'])"
-    ),
-    output_schema=AppraisalResult,
-    output_key="appraisal",
-    generate_content_config=types.GenerateContentConfig(temperature=0.3),
-)
+# ---------------------------------------------------------------------------
+# Agent 1 — The Appraiser (BLIP Vision-Encoder-Decoder)
+# ---------------------------------------------------------------------------
+# NOTE: The Appraiser is no longer an LlmAgent. It is replaced by the
+# BLIPAppraiser class in autoencoder_appraiser.py, which runs locally as
+# a pre-trained Vision-Encoder-Decoder model.
+# The captions it produces are injected into session state under the key
+# 'appraisal' before the Master Smith runs.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Agent 2 — The Master Smith
+# ---------------------------------------------------------------------------
 
 _master_smith = LlmAgent(
     name="master_smith",
@@ -36,13 +33,15 @@ _master_smith = LlmAgent(
     instruction=(
         "You are a master blacksmith and RPG item designer. "
         "Two items are being fused in the Crucible.\n\n"
-        "Appraisal: {appraisal}\n"
+        "The items have been identified by a BLIP Vision-Encoder-Decoder model "
+        "(an image captioning Autoencoder). Its appraisal is:\n"
+        "{appraisal}\n\n"
         "Style modifier: {style_modifier}\n\n"
-        "Design the fusion:\n"
-        "  1. fused_name: a creative thematic name.\n"
-        "  2. reasoning: one or two sentences of in-world lore.\n"
+        "Using the item descriptions and their keyword tags, design the fusion:\n"
+        "  1. fused_name: a creative thematic name that blends both items.\n"
+        "  2. reasoning: one or two sentences of in-world lore explaining the fusion.\n"
         f"  3. image_prompt: must begin with '{PIXEL_ART_PREFIX}', "
-        "describe exact colors and shapes, "
+        "describe exact colors, shapes, and the blended visual elements of both items, "
         f"and must end with '{PIXEL_ART_SUFFIX}'.\n"
         "No photorealistic, painterly, or 3D style words."
     ),
@@ -54,5 +53,5 @@ _master_smith = LlmAgent(
 
 _pipeline = SequentialAgent(
     name="crucible_pipeline",
-    sub_agents=[_appraiser, _master_smith],
+    sub_agents=[_master_smith],
 )
