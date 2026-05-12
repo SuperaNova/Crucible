@@ -10,17 +10,6 @@ DEFAULT_OUT_PATH = Path("data/sprites_clean.npy")
 
 
 class Smelter:
-    """
-    Filters raw sprite data from sprites.npy into a clean, deduplicated
-    set of item sprites suitable for use in the Crucible pipeline.
-
-    Heuristics applied in order:
-      1. Alpha coverage  — rejects nearly-transparent sprites
-      2. Std deviation   — rejects near-monochrome sprites
-      3. Color uniqueness — rejects sprites with too few distinct colors
-      4. Saturation      — rejects flat/greyscale sprites
-      5. Deduplication   — removes exact pixel-level duplicates via MD5
-    """
 
     # --- Thresholds ---
     ALPHA_THRESHOLD = 30        # Pixel alpha value considered "opaque"
