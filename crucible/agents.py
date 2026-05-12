@@ -14,16 +14,6 @@ PIXEL_ART_SUFFIX = (
 )
 
 # ---------------------------------------------------------------------------
-# Agent 1 — The Appraiser (Vision Autoencoder)
-# ---------------------------------------------------------------------------
-# NOTE: The Appraiser is no longer an LlmAgent. It is replaced by the
-# MoondreamAppraiser class in autoencoder_appraiser.py, which runs locally as
-# a pre-trained Vision-Language Model.
-# The captions it produces are injected into session state under the key
-# 'appraisal' before the Master Smith runs.
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # Agent 2 — The Master Smith
 # ---------------------------------------------------------------------------
 
@@ -36,7 +26,6 @@ _master_smith = LlmAgent(
         "The items have been identified by a Vision Autoencoder model "
         "(a local VLM). Its appraisal is:\n"
         "{appraisal}\n\n"
-        "Style modifier: {style_modifier}\n\n"
         "Using the item descriptions and their keyword tags, design the fusion:\n"
         "  1. fused_name: a creative thematic name that blends both items.\n"
         "  2. reasoning: one or two sentences of in-world lore explaining the fusion.\n"

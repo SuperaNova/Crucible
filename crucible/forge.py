@@ -59,7 +59,7 @@ class Forge:
             session_service=self._session_service,
         )
 
-    def quench(self, sprite_a, sprite_b, extra: str = "") -> tuple:
+    def quench(self, sprite_a, sprite_b) -> tuple:
         """Run the full fusion pipeline and return (preview_a, preview_b, forged, metadata)."""
         img_a = self._to_pil(sprite_a).resize((GEMINI_INPUT_SIZE, GEMINI_INPUT_SIZE), Image.NEAREST)
         img_b = self._to_pil(sprite_b).resize((GEMINI_INPUT_SIZE, GEMINI_INPUT_SIZE), Image.NEAREST)
@@ -82,7 +82,6 @@ class Forge:
             session_id=session_id,
             state={
                 "appraisal": appraisal,
-                "style_modifier": extra.strip() or "no special style",
             },
         ))
 

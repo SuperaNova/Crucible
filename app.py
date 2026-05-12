@@ -59,7 +59,7 @@ def idx_to_pil(idx: int) -> Image.Image | None:
     )
 
 
-def run_forge(idx_a: int, idx_b: int, extra: str):
+def run_forge(idx_a: int, idx_b: int):
     """
     Gradio callback for the Forge button.
     Runs the full three-agent pipeline and returns outputs for all UI components.
@@ -77,7 +77,7 @@ def run_forge(idx_a: int, idx_b: int, extra: str):
 
     try:
         preview_a, preview_b, forged, meta = forge_instance.quench(
-            sprite_a, sprite_b, extra
+            sprite_a, sprite_b
         )
         label = (
             f"## {meta['fused_name']}\n\n"
@@ -165,12 +165,7 @@ def build_ui() -> gr.Blocks:
         idx_a.change(fn=idx_to_pil, inputs=idx_a, outputs=preview_a)
         idx_b.change(fn=idx_to_pil, inputs=idx_b, outputs=preview_b)
 
-        # Style modifier + forge button
-        extra = gr.Textbox(
-            value="legendary, glowing",
-            label="Style Modifier (optional)",
-            placeholder="e.g. cursed, elemental, ancient...",
-        )
+        # Forge button
         forge_btn = gr.Button(
             "Forge",
             variant="primary",
@@ -203,7 +198,7 @@ def build_ui() -> gr.Blocks:
         # Wire up Forge button
         forge_btn.click(
             fn=run_forge,
-            inputs=[idx_a, idx_b, extra],
+            inputs=[idx_a, idx_b],
             outputs=[out_a, out_forged, out_b, fusion_label],
         )
 
