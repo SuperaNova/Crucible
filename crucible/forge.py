@@ -139,7 +139,7 @@ class Forge:
         Pixelate first (crush to PIXEL_GRID, scale back up with NEAREST),
         then quantize — so the palette snaps to hard pixel edges, not gradients.
         """
-        seed = random.randint(0, 99999)
+        seed = 676767
         url = (
             f"https://image.pollinations.ai/prompt/{quote(image_prompt)}"
             f"?width={POLLINATIONS_SIZE}&height={POLLINATIONS_SIZE}"

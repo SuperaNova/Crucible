@@ -16,10 +16,9 @@ Architecture (Encoder-Decoder family):
              language given a text prompt: answer = Decoder(h, prompt).
 
 This is architecturally equivalent to an image-conditioned Autoencoder whose
-reconstruction target is natural language rather than pixels. Unlike BLIP
-(trained primarily on MS COCO photographs), Moondream2 was trained on a much
-broader dataset that includes 2D digital art, game assets, and stylized icons,
-making it significantly more robust on pixel art sprites.
+reconstruction target is natural language rather than pixels. Moondream2 was 
+trained on a broad dataset that includes 2D digital art, game assets, and 
+stylized icons, making it robust on pixel art sprites.
 
 Reference:
   Kopuri, V. (2024). Moondream2: A Tiny Vision Language Model.
@@ -45,8 +44,7 @@ _REVISION = "2025-06-21"
 _APPRAISAL_PROMPT = (
     "You are an RPG item cataloguer. This is a pixel art icon of a fantasy item. "
     "State what the item is (e.g. 'iron sword', 'wooden shield', 'health potion'), "
-    "then briefly describe its material, color, and style. "
-    "Do not mention Minecraft, video games, or brand names. One short sentence only."
+    "then briefly describe its material, color, and style. One short sentence only."
 )
 
 

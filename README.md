@@ -1,137 +1,91 @@
-# The Crucible — A Hybrid VAE-LLM Multi-Agent Pipeline for RPG Sprite Synthesis
+# Crucible: Autonomous Sprite Synthesis Pipeline
+*(Intelligent Systems / CS346 Mini-Project)*
 
-An autonomous intelligence pipeline combining a **Vision-Encoder-Decoder (BLIP)** for local sprite appraisal with a **Google ADK-driven** LLM for creative synthesis. The BLIP model encodes each sprite into a latent visual representation and decodes it into a natural language caption, which is then handed off to the Master Smith LLM agent via shared session-state memory. The resulting high-entropy prompt is decoded into a 16-bit artifact using a CLIP-aligned generative backend and a custom pixel-lattice post-processing layer.
+Crucible is a Multi-Agent System (MAS) that uses advanced generative models to autonomously "fuse" two 2D pixel art RPG items into a completely new, technically coherent artifact. Instead of mathematically averaging pixels (which produces blurry artifacts), Crucible uses a **semantic fusion** approach: it uses AI to "see" the items, a second AI to "think" of a logical hybrid, and a third AI to "draw" the result.
 
-Built with **BLIP** (Salesforce Research, ICML 2022) and the **Google Agent Development Kit (ADK)**.
-
----
-
-## Architecture
-
-The system uses a Multi-Agent System (MAS) architecture where agents are autonomous units that communicate via a shared session state.
-
-```
-[sprite_a]  [sprite_b]
-     \            /
-      v          v
-  Agent 1 — The Appraiser
-  (BLIP Vision-Encoder-Decoder, Salesforce/blip-image-captioning-base)
-  Encodes both sprites into latent visual features,
-  decodes them into natural language captions.
-  Writes result to state['appraisal'] (no API call — runs locally).
-            |
-            v
-  Agent 2 — The Master Smith
-  (LlmAgent, gemini-3.1-flash-lite-preview, text only)
-  Reads {appraisal} captions from state, designs fusion,
-  and writes to state['smithing'].
-            |
-            v
-  Agent 3 — The Forger
-  (Deterministic pipeline)
-  Pollinations Flux -> pixelate -> quantize
-  Output: PIL.Image (512x512, 16-color pixel art)
-```
-
-### Why BLIP + ADK?
-The Appraiser is now a **Vision-Encoder-Decoder** model — the same architectural family as Autoencoders and VAEs — running fully locally without API costs. BLIP encodes each sprite's visual content into a latent representation and decodes it into a descriptive caption. This caption is injected into the ADK session state, allowing the Master Smith LLM to reason about the sprites without ever seeing the raw pixels. The Google ADK `SequentialAgent` orchestrator then manages the remaining flow.
+## I. Project Objective
+* **The Concept:** Crucible is designed as a prototype for an in-game crafting mechanic. In many RPGs, crafting systems are static—combining an Iron Ingot and a Stick always yields a generic Iron Sword. Crucible aims to show how generative AI can be embedded into a game engine to allow players to *actually* forge unique items on the fly, resulting in procedurally generated visual assets and lore that didn't exist in the game's original files.
+* **The Solution:** A hybrid Multi-Agent System that combines **Vision Autoencoders**, **Large Language Models (LLMs)**, and **Latent Diffusion Models**. This pipeline intelligently understands the *meaning* of base assets, reasons out a conceptual fusion, and generates high-fidelity pixel art.
 
 ---
 
-## Setup
+## II. Component Models (The Three Pillars)
 
-### 1. Install dependencies
+To satisfy the requirements of combining modern AI architectures, Crucible is built upon three distinct neural methodologies:
 
-```bash
-pip install -r requirements.txt
-```
+### 1. The Vision Autoencoder (Moondream2)
+* **Role:** The **Appraiser** Agent.
+* **Architecture:** Vision-Encoder-Decoder.
+* **How it Works:** 
+  * The **Encoder** (SigLIP Vision Transformer) compresses the high-dimensional input image (the sprite) into a low-dimensional, dense latent embedding space.
+  * The **Decoder** (Phi-1.5 Causal Language Model) reconstructs that embedding—not back into pixels, but into a natural language representation (a text caption).
+* **Why it was chosen:** We utilize this as a Semantic Autoencoder. Moondream2 (1.8B parameters) was chosen because its training distribution included vast amounts of 2D digital art and game UI, making it highly accurate at reading stylized RPG icons.
 
-### 2. Configure API key
+### 2. The Reasoning Engine (Gemini 3.1 Flash Lite Preview)
+* **Role:** The **Master Smith** Agent.
+* **Architecture:** Large Language Model (LLM).
+* **How it Works:** LLMs act as probabilistic engines trained to predict token sequences. In our system, Gemini acts as the "brain," performing zero-shot logical reasoning.
+* **Function in Pipeline:** It does not "see" the images directly. It ingests the text output from the Autoencoder, cross-references its massive internal knowledge of metallurgy and fantasy lore, and outputs structured JSON containing the new item's name, its lore, and a visual synthesis prompt.
 
-```bash
-cp .env.example .env
-# Edit .env and set GEMINI_API_KEY=your_key
-```
-
-Get a key at: https://aistudio.google.com/app/apikey
-
-### 3. Download and prepare the dataset
-
-You need Kaggle credentials. Either:
-
-- Place `kaggle.json` at `~/.kaggle/kaggle.json`
-- Or set `KAGGLE_USERNAME` and `KAGGLE_KEY` environment variables
-
-Download your token at: https://www.kaggle.com/settings -> API -> Create New Token
-
-Then run:
-
-```bash
-python setup.py
-```
-
-This downloads the `ebrahimelgazar/pixel-art` dataset, runs the `Smelter` filters, and saves `data/sprites_clean.npy`.
-
-### 4. Launch the app
-
-```bash
-python app.py
-```
-
-Open http://localhost:7860 in your browser.
+### 3. The Generative Foundation (Flux.1 via Pollinations)
+* **Role:** The **Forger** Agent.
+* **Architecture:** Latent Diffusion Model (Transformer-backed).
+* **How it Works:** Diffusion models are trained by adding Gaussian noise to an image (forward diffusion) and learning to predict and remove that noise (reverse diffusion/denoising).
+* **Function in Pipeline:** It takes the text prompt from the Master Smith and runs the reverse diffusion process on a random noise tensor to "manifest" the fused sprite. Flux was selected due to its superior text-adherence compared to older Convolutional U-Net models.
 
 ---
 
-## File Overview
+## III. System Architecture: Multi-Agent Orchestration
 
-| Path | Role |
-|---|---|
-| `app.py` | Gradio Blocks UI (entry point) |
-| `setup.py` | One-time dataset download and preparation |
-| `crucible/forge.py` | Orchestrator class and Forger pipeline |
-| `crucible/agents.py` | ADK Agent definitions (Master Smith) |
-| `crucible/autoencoder_appraiser.py` | BLIP Vision-Encoder-Decoder Appraiser |
-| `crucible/schemas.py` | Pydantic schemas for agent communication |
-| `crucible/smelter.py` | Data cleaning heuristics |
-| `notebooks/` | Archive of original research/colab versions |
+The handoff between these disparate models is managed by the **Google Agent Development Kit (ADK)**, creating a seamless, stateful Sequential Pipeline:
+
+1. **Stage 1 (Appraiser):** `Input Image -> ViT Encoder -> Latent Embedding -> Phi Decoder -> Text Caption`
+2. **Stage 2 (Master Smith):** `Text Captions -> ADK Session State -> LLM Context Window -> Fused Prompt & Lore`
+3. **Stage 3 (Forger):** `Fused Prompt -> Flux Diffusion Model -> Denoised Tensor -> Output Sprite`
+
+This separation of concerns allows each model to specialize: Moondream for Vision, Gemini for Logic, and Flux for Art.
 
 ---
 
-## Mathematical Overview
+## IV. Data Methodology & Representation
 
-### Why not latent space interpolation?
+### Sprite Representation
+Sprites are represented as `32x32` or `64x64` RGBA tensors. Before generation is finalized, the system applies hard-edge quantization and `NEAREST` neighbor downsampling to ensure the output snaps to a strict pixel grid rather than outputting blurry digital paintings.
 
-A natural approach to sprite fusion is to train a Variational Autoencoder (VAE) on the sprite dataset, encode both sprites into latent vectors **z_a** and **z_b**, and decode an interpolated point:
-
-```
-z_fused = (1 - alpha) * z_a + alpha * z_b,  alpha in [0, 1]
-```
-
-Because a well-trained VAE enforces a smooth posterior `q(z|x) ~ N(mu, sigma^2 I)` via the KL divergence term in the ELBO loss:
-
-```
-L = E[log p(x|z)] - KL( q(z|x) || p(z) )
-```
-
-Points between **z_a** and **z_b** on the learned manifold are more likely to decode into coherent images than random interpolations in pixel space.
-
-### Why this project uses BLIP for appraisal instead of a pixel-space VAE
-
-The `sprites.npy` dataset has approximately 7,000 items after cleaning — too few to train a VAE whose latent manifold generalizes reliably across item categories. At this scale, the reconstruction loss dominates and the KL term collapses, producing a posterior that memorizes rather than generalizes.
-
-Instead, we use **BLIP** (*Bootstrapping Language-Image Pre-training*, Li et al., ICML 2022) as the Appraiser. BLIP is a **Vision-Encoder-Decoder** model — architecturally equivalent to an image-conditioned Autoencoder — where:
-
-- The **Encoder** (Vision Transformer, ViT-B/16) maps the input sprite to a dense latent representation `h = Encoder(x)`.
-- The **Decoder** (BERT-based language model) reconstructs the image's semantic content as natural language: `caption = Decoder(h)`.
-
-This gives us the core Encoder-Decoder principle but leverages a model pre-trained on 129 million image-text pairs, making it robust even to our small sprite dataset. The output caption is then passed to the Master Smith LLM, which acts as a learned generative prior over RPG item semantics — effectively replacing the VAE decoder with a much larger, text-conditioned generative model (Pollinations Flux).
+### Dataset Filtering (The Smelter)
+We rely on the "16-bit RPG Item Collection" dataset from Kaggle (~1,400 sprites). To prevent "garbage in, garbage out" (GIGO) in the generative models, a preprocessing heuristic script called the **Smelter** was built.
+* **Filtering Criteria:** It automatically purges sprites that are too small, have messy alpha channel transparency, or lack sufficient color variance. Only structurally sound sprites are allowed into the Appraiser's context window.
 
 ---
 
-## Post-Processing Pipeline
+## V. Optimization & Safety
 
-The Forger applies two operations to convert Pollinations output into pixel art:
+### Prompt Engineering & Domain Adaptation
+To force a modern 2025-era Diffusion model (Flux) to render assets that look like 1990-era SNES sprites, we utilized strict Domain Adaptation techniques via Prompt Engineering:
+* **Style Prefixing:** Every prompt generated by the LLM is forcibly wrapped with strict stylistic constraints: `"pixel art, isolated on white background, 8-bit RPG icon"`.
+* **Hallucination Control:** The Moondream2 VLM is prompted with specific negative instructions (`"Do not mention Minecraft, video games, or brand names."`) to ensure the Master Smith receives clean, objective physical descriptions rather than copyrighted game lore.
 
-1. **Pixelation** — crush to 32x32 with `Image.NEAREST`, then scale back to 512x512 with `Image.NEAREST`. This forces a hard block grid regardless of the source image content.
+### Key Parameters & Reproducibility
+* **Deterministic Forging:** The Pollinations Flux API is called with explicitly generated random integer `seeds`. This allows infinite variations of the same item fusion, or strict reproducibility if a seed is reused.
+* **Quantization & Local Execution:** The Moondream2 Autoencoder is loaded in `float16` precision to ensure it fits entirely within the 6GB VRAM constraint of consumer-grade hardware (e.g., GTX 1660 Super) without sacrificing technical accuracy.
 
-2. **Palette quantization** — `Image.quantize(colors=16, method=MEDIANCUT)`. Applied *after* pixelation so the palette is snapped to already-hard pixel edges. Quantizing at full resolution before pixelation would preserve gradient blending that the subsequent downscale then averages into muddy intermediate colors.
+---
+
+## Running the Project
+
+1. **Install Dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Prepare the Data (The Smelter):**
+   *(Requires a `kaggle.json` token in `~/.kaggle/`)*
+   ```bash
+   python setup.py
+   ```
+
+3. **Launch the Crucible UI:**
+   *(Requires `GOOGLE_API_KEY` in `.env`)*
+   ```bash
+   python app.py
+   ```

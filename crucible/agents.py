@@ -14,11 +14,11 @@ PIXEL_ART_SUFFIX = (
 )
 
 # ---------------------------------------------------------------------------
-# Agent 1 — The Appraiser (BLIP Vision-Encoder-Decoder)
+# Agent 1 — The Appraiser (Vision Autoencoder)
 # ---------------------------------------------------------------------------
 # NOTE: The Appraiser is no longer an LlmAgent. It is replaced by the
-# BLIPAppraiser class in autoencoder_appraiser.py, which runs locally as
-# a pre-trained Vision-Encoder-Decoder model.
+# MoondreamAppraiser class in autoencoder_appraiser.py, which runs locally as
+# a pre-trained Vision-Language Model.
 # The captions it produces are injected into session state under the key
 # 'appraisal' before the Master Smith runs.
 # ---------------------------------------------------------------------------
@@ -33,8 +33,8 @@ _master_smith = LlmAgent(
     instruction=(
         "You are a master blacksmith and RPG item designer. "
         "Two items are being fused in the Crucible.\n\n"
-        "The items have been identified by a BLIP Vision-Encoder-Decoder model "
-        "(an image captioning Autoencoder). Its appraisal is:\n"
+        "The items have been identified by a Vision Autoencoder model "
+        "(a local VLM). Its appraisal is:\n"
         "{appraisal}\n\n"
         "Style modifier: {style_modifier}\n\n"
         "Using the item descriptions and their keyword tags, design the fusion:\n"
