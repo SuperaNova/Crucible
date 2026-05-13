@@ -1,12 +1,12 @@
 """
 autoencoder_appraiser.py
 ------------------------
-Replaces the Gemini Vision LLM Appraiser with Moondream2
+Implements the Appraiser agent using Moondream2
 (vikhyatk/moondream2, rev 2025-06-21) — a compact 1.8B parameter
 Vision-Language Model designed to run efficiently on consumer GPUs.
 
 Loaded via HuggingFace `transformers` using the latest stable revision.
-Uses the new unified API introduced in 2025 where caption() and query()
+Uses the unified API introduced in 2025 where caption() and query()
 accept PIL Images directly — no separate tokenizer or encode_image() needed.
 
 Architecture (Encoder-Decoder family):
@@ -16,8 +16,8 @@ Architecture (Encoder-Decoder family):
              language given a text prompt: answer = Decoder(h, prompt).
 
 This is architecturally equivalent to an image-conditioned Autoencoder whose
-reconstruction target is natural language rather than pixels. Moondream2 was 
-trained on a broad dataset that includes 2D digital art, game assets, and 
+reconstruction target is natural language rather than pixels. Moondream2 was
+trained on a broad dataset that includes 2D digital art, game assets, and
 stylized icons, making it robust on pixel art sprites.
 
 Reference:

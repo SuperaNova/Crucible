@@ -65,7 +65,7 @@ class Forge:
         img_b = self._to_pil(sprite_b).resize((GEMINI_INPUT_SIZE, GEMINI_INPUT_SIZE), Image.NEAREST)
 
         # ------------------------------------------------------------------
-        # Stage 1 — BLIP Appraisal (Vision-Encoder-Decoder, runs locally)
+        # Stage 1 — Moondream2 Appraisal (Vision-Language Model, runs locally)
         # ------------------------------------------------------------------
         print("[MoondreamAppraiser] Running ...")
         appraisal = self._appraiser.appraise(img_a, img_b)
@@ -105,6 +105,7 @@ class Forge:
 
         print(f"[Master Smith] Fused:  {smithing.get('fused_name')}")
         print(f"[Master Smith] Reason: {smithing.get('reasoning')}")
+        print(f"[Master Smith] Prompt: {smithing.get('image_prompt')}")
 
         prompt = smithing.get("image_prompt", "")
         if not prompt.startswith(PIXEL_ART_PREFIX):

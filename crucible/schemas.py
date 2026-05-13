@@ -2,8 +2,8 @@ from pydantic import BaseModel
 
 class AppraisalResult(BaseModel):
     """
-    Structured output from the BLIP Vision-Encoder-Decoder Appraiser.
-    Fields match the dict returned by BLIPAppraiser.appraise() and are
+    Structured output from the Moondream2 Vision-Language Model Appraiser.
+    Fields match the dict returned by MoondreamAppraiser.appraise() and are
     injected into ADK session state before the Master Smith runs.
     """
     item_a: str
