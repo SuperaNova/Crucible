@@ -17,8 +17,8 @@ Planning, and Generating with Multimodal LLMs"):
 
 VRAM management
 ---------------
-SigLIP (~0.4 GB) and Moondream2 (~3.5 GB) in float16 each fit a 6 GB card
-(e.g. GTX 1660 Super). Stages 2 and 3 are API-only (no GPU). SpriteAppraiser
+SigLIP SO400M (~1.7 GB) and Moondream2 (~3.5 GB) in float16 each fit a 6 GB
+card (e.g. GTX 1660 Super). Stages 2 and 3 are API-only (no GPU). SpriteAppraiser
 loads the two models in sequence and unloads each — freeing the CUDA cache —
 so peak VRAM stays ~3.5 GB and is fully released before Stage 2 begins.
 """

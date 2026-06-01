@@ -47,21 +47,33 @@ from transformers import AutoModel, AutoModelForCausalLM, AutoProcessor
 
 _MOONDREAM_ID = "vikhyatk/moondream2"
 _MOONDREAM_REV = "2025-06-21"
-# Swap to "google/siglip-so400m-patch14-384" for higher accuracy (larger download).
-_SIGLIP_ID = "google/siglip-base-patch16-224"
+# SO400M is the strong zero-shot SigLIP. Swap to "google/siglip-base-patch16-224"
+# for a much smaller/faster download at the cost of accuracy.
+_SIGLIP_ID = "google/siglip-so400m-patch14-384"
 
 VLM_INPUT_SIZE = 384  # LANCZOS upscale target fed to both models for perception.
 
-# Closed-set RPG item vocabulary for SigLIP zero-shot identity. Tune freely.
+# Closed-set item vocabulary for SigLIP zero-shot identity. Tune freely.
+# Ambiguous words are disambiguated ("bow" -> "archery bow") so the text encoder
+# does not confuse a weapon with a ribbon/bowtie.
 ITEM_VOCAB = [
-    "sword", "dagger", "axe", "mace", "war hammer", "spear", "bow", "crossbow",
-    "staff", "wand", "shield", "helmet", "armor", "gauntlet", "boot", "cape",
-    "ring", "amulet", "gem", "crystal", "orb", "potion", "flask", "scroll",
-    "book", "key", "coin", "treasure chest", "torch", "lantern", "bottle",
-    "barrel", "pickaxe", "shovel", "fishing rod", "flower", "leaf", "mushroom",
-    "bone", "skull", "egg", "feather", "meat", "bread", "fish", "fruit",
+    "sword", "dagger", "axe", "mace", "war hammer", "spear", "archery bow",
+    "crossbow", "magic staff", "wand", "shield", "helmet", "body armor",
+    "gauntlet", "boot", "cape", "ring", "amulet", "gemstone", "crystal", "orb",
+    "potion bottle", "flask", "scroll", "book", "key", "gold coin",
+    "treasure chest", "torch", "lantern", "glass bottle", "barrel", "pickaxe",
+    "shovel", "fishing rod", "flower", "leaf", "mushroom", "bone", "skull",
+    "egg", "feather", "meat", "bread", "fish", "fruit",
 ]
-_PROMPT_TEMPLATE = "a pixel art icon of a {}"
+
+# Prompt ensembling: each class is scored under several templates and the scores
+# are averaged. RPG/video-game context steers ambiguous words toward the item
+# sense. This is the standard CLIP/SigLIP zero-shot accuracy trick.
+_PROMPT_TEMPLATES = [
+    "a pixel art icon of a {}",
+    "a {} sprite in a fantasy RPG video game",
+    "a small pixel art {}",
+]
 
 # Moondream is asked for appearance ONLY — never identity, never parts.
 _DESCRIBE_PROMPT = (
@@ -86,7 +98,10 @@ class SiglipClassifier:
     def __init__(self, vocab: list[str] = ITEM_VOCAB) -> None:
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._vocab = list(vocab)
-        self._prompts = [_PROMPT_TEMPLATE.format(c) for c in self._vocab]
+        self._n_templates = len(_PROMPT_TEMPLATES)
+        # Class-major order: [c0t0, c0t1, ..., c1t0, ...] so a simple reshape to
+        # (num_classes, num_templates) lines up for per-class averaging.
+        self._prompts = [t.format(c) for c in self._vocab for t in _PROMPT_TEMPLATES]
 
         print(f"[SiglipClassifier] Loading '{_SIGLIP_ID}' on {self._device.upper()} ...")
         self._processor = AutoProcessor.from_pretrained(_SIGLIP_ID)
@@ -98,8 +113,8 @@ class SiglipClassifier:
         self._model.eval()
         print("[SiglipClassifier] Model loaded.")
 
-    def classify(self, img: Image.Image) -> str:
-        """Return the single best-matching item type from the vocabulary."""
+    def classify(self, img: Image.Image, topk: int = 3) -> str:
+        """Return the best-matching item type; print the top-k for transparency."""
         inputs = self._processor(
             text=self._prompts,
             images=_upscale(img),
@@ -112,7 +127,17 @@ class SiglipClassifier:
         with torch.no_grad():
             logits = self._model(**inputs).logits_per_image[0]
 
-        return self._vocab[int(logits.argmax())]
+        # Average the per-template logits down to one score per class.
+        scores = logits.float().view(len(self._vocab), self._n_templates).mean(dim=1)
+        order = scores.argsort(descending=True)
+
+        top = ", ".join(
+            f"{self._vocab[int(i)]} ({scores[int(i)]:.1f})"
+            for i in order[:min(topk, len(self._vocab))]
+        )
+        print(f"[SiglipClassifier] top-{topk}: {top}")
+
+        return self._vocab[int(order[0])]
 
     def unload(self) -> None:
         if getattr(self, "_model", None) is not None:
