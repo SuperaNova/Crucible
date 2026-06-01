@@ -1,170 +1,212 @@
 """
 autoencoder_appraiser.py
 ------------------------
-Implements the Appraiser agent using Moondream2
-(vikhyatk/moondream2, rev 2025-06-21) — a compact 1.8B parameter
-Vision-Language Model designed to run efficiently on consumer GPUs.
+Stage 1 (RPG Recaptioning). Two specialised vision models, each used only for
+what it is actually good at:
 
-Loaded via HuggingFace `transformers` using the latest stable revision.
-Uses the unified API introduced in 2025 where caption() and query()
-accept PIL Images directly — no separate tokenizer or encode_image() needed.
+  * SiglipClassifier — zero-shot item *identity*. SigLIP (Zhai et al., 2023) is
+    a contrastive image-text model; scoring a sprite against a fixed RPG
+    vocabulary ("sword", "gem", "potion", ...) is far more reliable than asking
+    a small generative VLM the open-ended "what is this?", which hallucinates on
+    16x16 art (it once called a blue gem a "health potion"). Classification over
+    a closed set is a much easier task than open generation for a small model.
 
-Architecture (Encoder-Decoder family):
-  - Encoder: SigLIP Vision Transformer encodes the input image into a dense
-             latent visual embedding h = Encoder(x).
-  - Decoder: A Phi-based causal language model decodes h into natural
-             language given a text prompt: answer = Decoder(h, prompt).
+  * MoondreamDescriber — Moondream2 (1.8B VLM) describes *appearance only*
+    (colours, materials, textures). It is good at this and bad at naming, so we
+    never ask it to name the item or list parts — the cascading "fake sword"
+    failures came from Moondream parroting an example parts list.
 
-This is architecturally equivalent to an image-conditioned Autoencoder whose
-reconstruction target is natural language rather than pixels. Moondream2 was
-trained on a broad dataset that includes 2D digital art, game assets, and
-stylized icons, making it robust on pixel art sprites.
+The Master Smith downstream is given each item's reliable TYPE plus an
+appearance description, and derives the fused item's parts itself.
+
+VRAM
+----
+Both models run on local GPU. They are loaded and unloaded in sequence (SigLIP
+first, then Moondream) so peak VRAM stays ~3.5 GB — within a 6 GB budget.
+
+Perception input
+----------------
+Sprites are tiny (16x16). For perception we upscale with **LANCZOS** (smooth),
+NOT nearest-neighbour — hard pixel blocks are out-of-distribution for these
+models. The pixelated look is re-imposed only on the final generated output.
 
 Reference:
+  Zhai et al. (2023). Sigmoid Loss for Language Image Pre-Training (SigLIP).
   Kopuri, V. (2024). Moondream2: A Tiny Vision Language Model.
-  HuggingFace: https://huggingface.co/vikhyatk/moondream2
 """
 
 from __future__ import annotations
 
 import torch
 from PIL import Image
-from transformers import AutoModelForCausalLM
+from transformers import AutoModel, AutoModelForCausalLM, AutoProcessor
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_MODEL_ID = "vikhyatk/moondream2"
-_REVISION = "2025-06-21"
+_MOONDREAM_ID = "vikhyatk/moondream2"
+_MOONDREAM_REV = "2025-06-21"
+# Swap to "google/siglip-so400m-patch14-384" for higher accuracy (larger download).
+_SIGLIP_ID = "google/siglip-base-patch16-224"
 
-# Directed VQA prompts. Moondream2 supports full instruction-following, so the
-# Appraiser asks two targeted questions per sprite to give the Master Smith dense,
-# part-level grounding rather than a single vague caption. Moondream stays in
-# natural language (it is unreliable at strict JSON); the structured decomposition
-# into a part blueprint is the LLM Smith's job downstream.
-_IDENTITY_PROMPT = (
-    "You are an RPG item cataloguer. This is a pixel art icon of a fantasy item. "
-    "State what the item is (e.g. 'iron sword', 'wooden shield', 'health potion'), "
-    "then briefly describe its material and dominant colors. One short sentence only."
+VLM_INPUT_SIZE = 384  # LANCZOS upscale target fed to both models for perception.
+
+# Closed-set RPG item vocabulary for SigLIP zero-shot identity. Tune freely.
+ITEM_VOCAB = [
+    "sword", "dagger", "axe", "mace", "war hammer", "spear", "bow", "crossbow",
+    "staff", "wand", "shield", "helmet", "armor", "gauntlet", "boot", "cape",
+    "ring", "amulet", "gem", "crystal", "orb", "potion", "flask", "scroll",
+    "book", "key", "coin", "treasure chest", "torch", "lantern", "bottle",
+    "barrel", "pickaxe", "shovel", "fishing rod", "flower", "leaf", "mushroom",
+    "bone", "skull", "egg", "feather", "meat", "bread", "fish", "fruit",
+]
+_PROMPT_TEMPLATE = "a pixel art icon of a {}"
+
+# Moondream is asked for appearance ONLY — never identity, never parts.
+_DESCRIBE_PROMPT = (
+    "Describe only the visual appearance of this small icon: its dominant colours, "
+    "the materials or textures it appears to be made of, and any glow, pattern, or "
+    "outline. Do not name or guess what the object is. One short sentence."
 )
-_PARTS_PROMPT = (
-    "This is a pixel art icon of a fantasy item. List its distinct visible physical "
-    "parts as a short comma-separated list (e.g. 'blade, crossguard, grip, pommel'). "
-    "If it is a single solid object with no separate parts, answer 'whole'."
-)
+
+
+def _upscale(img: Image.Image, size: int = VLM_INPUT_SIZE) -> Image.Image:
+    """Smooth (LANCZOS) upscale of a tiny sprite for VLM perception."""
+    return img.convert("RGB").resize((size, size), Image.LANCZOS)
 
 
 # ---------------------------------------------------------------------------
-# MoondreamAppraiser
+# SigLIP — zero-shot item identity
 # ---------------------------------------------------------------------------
 
-class MoondreamAppraiser:
-    """
-    Encodes two sprites via Moondream2 and returns natural-language descriptions
-    that can be used by the Master Smith agent as an appraisal.
+class SiglipClassifier:
+    """Zero-shot item-type classifier scoring a sprite against ITEM_VOCAB."""
 
-    Uses the 2025-06-21 API: model.query(image, prompt) and model.caption(image).
-    The model is loaded once and cached on the instance.
+    def __init__(self, vocab: list[str] = ITEM_VOCAB) -> None:
+        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._vocab = list(vocab)
+        self._prompts = [_PROMPT_TEMPLATE.format(c) for c in self._vocab]
 
-    Fits comfortably within 6 GB VRAM (e.g. GTX 1660 Super) in float16.
-    """
+        print(f"[SiglipClassifier] Loading '{_SIGLIP_ID}' on {self._device.upper()} ...")
+        self._processor = AutoProcessor.from_pretrained(_SIGLIP_ID)
+        self._model = AutoModel.from_pretrained(
+            _SIGLIP_ID,
+            torch_dtype=torch.float16 if self._device == "cuda" else torch.float32,
+        )
+        self._model.to(self._device)
+        self._model.eval()
+        print("[SiglipClassifier] Model loaded.")
+
+    def classify(self, img: Image.Image) -> str:
+        """Return the single best-matching item type from the vocabulary."""
+        inputs = self._processor(
+            text=self._prompts,
+            images=_upscale(img),
+            padding="max_length",   # SigLIP requires fixed-length padding.
+            return_tensors="pt",
+        ).to(self._device)
+        # Match image dtype to the (possibly fp16) model weights.
+        inputs["pixel_values"] = inputs["pixel_values"].to(self._model.dtype)
+
+        with torch.no_grad():
+            logits = self._model(**inputs).logits_per_image[0]
+
+        return self._vocab[int(logits.argmax())]
+
+    def unload(self) -> None:
+        if getattr(self, "_model", None) is not None:
+            del self._model
+            self._model = None
+            if self._device == "cuda":
+                torch.cuda.empty_cache()
+            print("[SiglipClassifier] Model unloaded, VRAM released.")
+
+
+# ---------------------------------------------------------------------------
+# Moondream2 — appearance description (no naming)
+# ---------------------------------------------------------------------------
+
+class MoondreamDescriber:
+    """Moondream2 VLM used only to describe appearance (colours/materials)."""
 
     def __init__(self) -> None:
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         print(
-            f"[MoondreamAppraiser] Loading '{_MODEL_ID}' (rev {_REVISION}) "
+            f"[MoondreamDescriber] Loading '{_MOONDREAM_ID}' (rev {_MOONDREAM_REV}) "
             f"on {self._device.upper()} ..."
         )
-
         self._model = AutoModelForCausalLM.from_pretrained(
-            _MODEL_ID,
-            revision=_REVISION,
+            _MOONDREAM_ID,
+            revision=_MOONDREAM_REV,
             trust_remote_code=True,
             torch_dtype=torch.float16 if self._device == "cuda" else torch.float32,
         )
         self._model.to(self._device)
         self._model.eval()
+        print("[MoondreamDescriber] Model loaded.")
 
-        print("[MoondreamAppraiser] Model loaded.")
+    def describe(self, img: Image.Image) -> str:
+        with torch.no_grad():
+            answer: str = self._model.query(_upscale(img), _DESCRIBE_PROMPT)["answer"]
+        return answer.strip()
 
     def unload(self) -> None:
-        """
-        Release the model from GPU memory and clear the CUDA cache.
-
-        Call this after appraise() returns if VRAM is needed for subsequent
-        pipeline stages. After calling unload(), this instance must not be
-        used again — create a new MoondreamAppraiser for the next run.
-        """
-        if hasattr(self, "_model") and self._model is not None:
+        if getattr(self, "_model", None) is not None:
             del self._model
             self._model = None
             if self._device == "cuda":
-                import torch as _torch
-                _torch.cuda.empty_cache()
-            print("[MoondreamAppraiser] Model unloaded, VRAM released.")
+                torch.cuda.empty_cache()
+            print("[MoondreamDescriber] Model unloaded, VRAM released.")
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# SpriteAppraiser — orchestrates the two models for Stage 1
+# ---------------------------------------------------------------------------
+
+class SpriteAppraiser:
+    """
+    Stage 1 appraiser: SigLIP identity + Moondream appearance.
+
+    The two models are loaded and unloaded in sequence so they never sit in VRAM
+    at the same time (peak ~3.5 GB). Returns a structured per-item dict::
+
+        {
+            "item_a": {"type": str, "description": str, "tags": [str, ...]},
+            "item_b": {...},
+        }
+    """
 
     def appraise(self, img_a: Image.Image, img_b: Image.Image) -> dict:
-        """
-        Appraise both sprites and return a structured per-item dict for the
-        Master Smith to ground its part-level material blueprint on.
+        # Phase 1 — identity (SigLIP zero-shot)
+        clf = SiglipClassifier()
+        type_a = clf.classify(img_a)
+        type_b = clf.classify(img_b)
+        print(f"[Stage 1] SigLIP identity  — A: '{type_a}'   B: '{type_b}'")
+        clf.unload()
+        del clf
 
-        Args:
-            img_a: PIL Image for sprite A.
-            img_b: PIL Image for sprite B.
-
-        Returns:
-            dict of the form::
-
-                {
-                    "item_a": {"description": str, "parts": str, "tags": [str, ...]},
-                    "item_b": {"description": str, "parts": str, "tags": [str, ...]},
-                }
-        """
-        item_a = self._appraise_one(img_a, "A")
-        item_b = self._appraise_one(img_b, "B")
-        return {"item_a": item_a, "item_b": item_b}
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    def _appraise_one(self, img: Image.Image, label: str) -> dict:
-        """
-        Run two directed VQA queries on a single sprite: one for identity +
-        material + colours, one for its visible parts. Returns a structured
-        per-item appraisal dict.
-        """
-        description = self._query(img, _IDENTITY_PROMPT)
-        parts = self._query(img, _PARTS_PROMPT)
-
-        print(f"[MoondreamAppraiser] Item {label}: {description}")
-        print(f"[MoondreamAppraiser] Item {label} parts: {parts}")
+        # Phase 2 — appearance (Moondream2)
+        describer = MoondreamDescriber()
+        desc_a = describer.describe(img_a)
+        desc_b = describer.describe(img_b)
+        print(f"[Stage 1] Moondream appearance — A: {desc_a}")
+        print(f"[Stage 1] Moondream appearance — B: {desc_b}")
+        describer.unload()
+        del describer
 
         return {
-            "description": description,
-            "parts": parts,
-            "tags": _extract_tags(description),
+            "item_a": {
+                "type": type_a,
+                "description": desc_a,
+                "tags": _extract_tags(f"{type_a} {desc_a}"),
+            },
+            "item_b": {
+                "type": type_b,
+                "description": desc_b,
+                "tags": _extract_tags(f"{type_b} {desc_b}"),
+            },
         }
-
-    def _query(self, img: Image.Image, prompt: str) -> str:
-        """
-        Run a single directed VQA query on a PIL image using Moondream2.
-
-        Moondream2 internally encodes the image into its latent embedding
-        (Encoder step) then decodes the latent conditioned on the prompt
-        (Decoder step). The 2025 API exposes this as a single query() call.
-        """
-        img_rgb = img.convert("RGB")
-
-        with torch.no_grad():
-            answer: str = self._model.query(img_rgb, prompt)["answer"]
-
-        return answer.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -176,21 +218,18 @@ _STOPWORDS = {
     "is", "it", "its", "at", "by", "for", "from", "that", "this",
     "has", "are", "be", "as", "do", "i", "no", "not", "like",
     "item", "sprite", "icon", "pixel", "art", "fantasy", "rpg",
-    "one", "short", "sentence",
+    "one", "short", "sentence", "appears", "made", "looks",
 }
 
 
-def _extract_tags(caption: str) -> list[str]:
-    """
-    Extract meaningful keyword tags from a caption by removing stopwords.
-    Returns a list of up to 6 unique tokens.
-    """
-    tokens = caption.lower().replace(",", "").replace(".", "").split()
-    tags = [t for t in tokens if t not in _STOPWORDS and len(t) > 2]
+def _extract_tags(text: str) -> list[str]:
+    """Extract up to 6 unique keyword tags from text by removing stopwords."""
+    tokens = text.lower().replace(",", "").replace(".", "").split()
     seen: set[str] = set()
     unique_tags: list[str] = []
-    for tag in tags:
-        if tag not in seen:
-            seen.add(tag)
-            unique_tags.append(tag)
+    for tok in tokens:
+        if tok in _STOPWORDS or len(tok) <= 2 or tok in seen:
+            continue
+        seen.add(tok)
+        unique_tags.append(tok)
     return unique_tags[:6]

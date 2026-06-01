@@ -9,15 +9,15 @@ class ItemAppraisal(BaseModel):
     and injected into ADK session state for the Master Smith to ground on.
 
     Fields:
-        description: Identity + material + dominant colours of the item, as a single
-                     natural-language sentence (e.g. "An iron sword with a grey steel
-                     blade and a brown leather-wrapped grip").
-        parts:       Visible physical parts, comma-separated (e.g. "blade, crossguard,
-                     grip, pommel"); "whole" for a single solid object.
-        tags:        Keyword tokens extracted from the description.
+        type:        Item identity from the SigLIP zero-shot classifier, drawn from a
+                     fixed RPG vocabulary (e.g. "gem", "sword", "potion").
+        description: Appearance (colours / materials / textures) from Moondream2, as a
+                     single natural-language sentence. Moondream is never asked to name
+                     the item — that is SigLIP's job.
+        tags:        Keyword tokens extracted from type + description.
     """
+    type: str
     description: str
-    parts: str
     tags: list[str]
 
 

@@ -3,7 +3,7 @@ from google.genai import types
 
 from .schemas import SmithingResult
 
-MODEL = "gemini-3.1-flash-lite-preview"
+MODEL = "gemini-3.1-flash-lite"
 
 PIXEL_ART_PREFIX = "pixel art sprite, 32x32 grid, RPG game item icon, "
 PIXEL_ART_SUFFIX = (
@@ -47,11 +47,14 @@ _master_smith = LlmAgent(
         "Design the fused item as a concrete, part-by-part material blueprint. "
         "Think carefully through four steps:\n\n"
         "STEP 1 — ARCHETYPE & SKELETON\n"
-        "Decide the base form (archetype) of the fused item — usually inherit the "
-        "silhouette of whichever source item has the stronger/clearer shape (e.g. a "
-        "sword keeps its blade silhouette). Then enumerate that archetype's canonical "
-        "physical parts (e.g. a sword -> blade, crossguard, grip, pommel; a shield -> "
-        "face, rim, boss). Set `archetype` to a short noun phrase (e.g. 'longsword').\n\n"
+        "Each item's TYPE (from a zero-shot classifier) and appearance are given above; "
+        "trust the TYPE for what each item actually is. Decide the fused item's base "
+        "form (`archetype`) — usually the more equipment-like / structurally dominant "
+        "of the two types (e.g. fusing a 'gem' and an 'axe' yields a gem-encrusted axe; "
+        "fusing two blades yields a sword). Then enumerate that archetype's canonical "
+        "physical parts yourself (e.g. a sword -> blade, crossguard, grip, pommel; a "
+        "gem -> facets, setting). Set `archetype` to a short noun phrase (e.g. "
+        "'longsword', 'jewelled axe').\n\n"
         "STEP 2 — PART-BY-PART MATERIAL ASSIGNMENT\n"
         "For EVERY part, output one entry in `parts` with concrete, physical values:\n"
         "  - `part`     : the component name (e.g. 'blade').\n"

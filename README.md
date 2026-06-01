@@ -15,13 +15,14 @@ The RPG paper proposes using an MLLM as a global planner that decomposes a compl
 
 Crucible maps directly onto the three stages of the RPG framework, adapted from spatial scene generation to sprite composition:
 
-### Stage 1 — Recaptioning: The Vision Appraiser (Moondream2)
-* **RPG Role:** Recaptioning — the MLLM reads both source sprites and produces rich semantic descriptions, replacing the original paper's "complex prompt → sub-prompt decomposition" with "sprite → appraisal" for each input.
-* **Architecture:** Vision-Language Model (Encoder-Decoder).
-* **How it Works:**
-  * The **Encoder** (SigLIP Vision Transformer) compresses the input sprite into a dense latent visual embedding.
-  * The **Decoder** (Phi-based Causal Language Model) decodes that embedding into natural language conditioned on a VQA prompt. The Appraiser runs **two directed queries per sprite** — one for identity + material + dominant colours, one for its visible parts — giving the Master Smith the part-level grounding it needs for material assignment.
-* **Why it was chosen:** Moondream2 (1.8B parameters) was chosen because its training distribution included 2D digital art and game assets, making it highly accurate at reading stylized RPG icons. It fits within 6 GB VRAM in `float16`. After Stage 1 completes, the model is **explicitly unloaded** from GPU to free VRAM for subsequent stages.
+### Stage 1 — Recaptioning: The Vision Appraiser (SigLIP + Moondream2)
+* **RPG Role:** Recaptioning — read both source sprites and produce a reliable, grounded description for each, replacing the original paper's "complex prompt → sub-prompt decomposition" with "sprite → appraisal."
+* **Architecture:** Two specialised vision models, each used only for what it is good at:
+  * **Identity — SigLIP zero-shot classifier** (Zhai et al., 2023). The sprite is scored against a fixed RPG vocabulary (`sword`, `gem`, `potion`, `shield`, …) and the best match is taken as the item `type`. Closed-set classification is dramatically more reliable than open-ended generation for a 16×16 icon — a small generative VLM asked "what is this?" will confidently mislabel a blue gem as a "health potion."
+  * **Appearance — Moondream2** (1.8B VLM). Moondream is asked for *appearance only* — dominant colours, materials, and textures — and is **never** asked to name the item or list parts (parroted part lists were the cause of cascading "fake sword" outputs). It is genuinely good at this.
+* **Why this split:** It plays to each model's strength and removes the two failure modes we observed (mis-identification and example-parroting). The Master Smith downstream is handed each item's trustworthy `type` plus an appearance description, and derives the fused item's parts itself.
+* **Perception detail:** Sprites are upscaled with **LANCZOS** (smooth), not nearest-neighbour, before being fed to the models — hard pixel blocks are out-of-distribution for both. The pixelated look is re-imposed only on the final generated output.
+* **VRAM:** SigLIP (~0.4 GB) and Moondream2 (~3.5 GB) in `float16` are loaded and unloaded **in sequence**, so peak VRAM stays ~3.5 GB (within a 6 GB GTX 1660 Super budget) and is fully released before Stage 2.
 
 ### Stage 2 — CoT Planning: The Master Smith (Gemini Flash Lite via Google ADK)
 * **RPG Role:** Multimodal Chain-of-Thought Planning — the MLLM acts as a global planner. In the original paper the LLM plans spatial bounding-box regions, each with a dense sub-prompt; here it plans a *part-level material blueprint* across the two sprites.
@@ -46,7 +47,7 @@ Crucible maps directly onto the three stages of the RPG framework, adapted from 
 
 The handoff between these disparate models is managed by the **Google Agent Development Kit (ADK)**, creating a stateful Sequential Pipeline that mirrors the three stages of the RPG framework:
 
-1. **Stage 1 — Recaptioning (Appraiser):** `Input Sprites → SigLIP Encoder → Latent Embedding → Phi Decoder → Per-Item Appraisal (description + parts + tags)`
+1. **Stage 1 — Recaptioning (Appraiser):** `Input Sprites → SigLIP Zero-Shot (item type) + Moondream2 (appearance) → Per-Item Appraisal (type + description + tags)`
 2. **Stage 2 — CoT Planning (Master Smith):** `Appraisal → ADK Session State → LLM CoT Reasoning → Part-Level Material Blueprint + Archetype + Structure Source`
 3. **Stage 3 — Generation (Forger):** `Blueprint → Deterministic Prompt Assembly → Flux.1 Diffusion → Pixel Art Post-Processing → Output Sprite`
 
@@ -127,7 +128,7 @@ Crucible/
 ├── crucible/
 │   ├── __init__.py
 │   ├── agents.py                 # Google ADK agent definitions (Master Smith)
-│   ├── autoencoder_appraiser.py  # Stage 1: Moondream2 Vision-Language Model
+│   ├── autoencoder_appraiser.py  # Stage 1: SigLIP identity + Moondream2 appearance
 │   ├── forge.py                  # Forge class — orchestrates the full pipeline
 │   ├── schemas.py                # Pydantic schemas for structured agent output
 │   └── smelter.py                # Dataset filtering & deduplication utility

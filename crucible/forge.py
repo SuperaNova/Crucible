@@ -5,8 +5,9 @@ Orchestrates the three-stage Crucible pipeline, modelled on the RPG framework
 (Yang et al., ICML 2024 — "Mastering Text-to-Image Diffusion: Recaptioning,
 Planning, and Generating with Multimodal LLMs"):
 
-  Stage 1 — Recaptioning  : MoondreamAppraiser reads both sprites and produces
-                             semantic captions + keyword tags.
+  Stage 1 — Recaptioning  : SpriteAppraiser reads both sprites — SigLIP gives the
+                             item identity (type) and Moondream2 describes the
+                             appearance (colours/materials) + keyword tags.
   Stage 2 — CoT Planning  : Master Smith (Gemini via Google ADK) analyses the
                              appraisal and produces a structured part-by-part
                              material blueprint (+ archetype, structure_source).
@@ -16,10 +17,10 @@ Planning, and Generating with Multimodal LLMs"):
 
 VRAM management
 ---------------
-Moondream2 uses ~3.5 GB in float16 on a 6 GB card (e.g. GTX 1660 Super).
-Stages 2 and 3 are API-only (no GPU). To keep peak VRAM within budget,
-MoondreamAppraiser is instantiated lazily inside quench() and explicitly
-unloaded — freeing the CUDA cache — before Stage 2 begins.
+SigLIP (~0.4 GB) and Moondream2 (~3.5 GB) in float16 each fit a 6 GB card
+(e.g. GTX 1660 Super). Stages 2 and 3 are API-only (no GPU). SpriteAppraiser
+loads the two models in sequence and unloads each — freeing the CUDA cache —
+so peak VRAM stays ~3.5 GB and is fully released before Stage 2 begins.
 """
 
 import asyncio
@@ -39,7 +40,7 @@ from google.genai import types
 from PIL import Image
 
 from .agents import PIXEL_ART_PREFIX, PIXEL_ART_SUFFIX, _pipeline
-from .autoencoder_appraiser import MoondreamAppraiser
+from .autoencoder_appraiser import SpriteAppraiser
 
 load_dotenv()
 
@@ -47,7 +48,6 @@ load_dotenv()
 # Constants
 # ---------------------------------------------------------------------------
 
-GEMINI_INPUT_SIZE = 128
 UI_PREVIEW_SIZE = 512
 POLLINATIONS_SIZE = 512
 PIXEL_GRID = 32
@@ -90,21 +90,17 @@ class Forge:
 
     def quench(self, sprite_a, sprite_b) -> tuple:
         """Run the full fusion pipeline and return (preview_a, preview_b, forged, metadata)."""
-        img_a = self._to_pil(sprite_a).resize((GEMINI_INPUT_SIZE, GEMINI_INPUT_SIZE), Image.NEAREST)
-        img_b = self._to_pil(sprite_b).resize((GEMINI_INPUT_SIZE, GEMINI_INPUT_SIZE), Image.NEAREST)
+        raw_a = self._to_pil(sprite_a)   # native sprite (e.g. 16x16)
+        raw_b = self._to_pil(sprite_b)
 
         # ------------------------------------------------------------------
-        # Stage 1 — Recaptioning (Moondream2 Vision-Language Model, local GPU)
+        # Stage 1 — Recaptioning (SigLIP identity + Moondream appearance, local GPU)
         # ------------------------------------------------------------------
-        # Moondream2 is loaded here, used once, then unloaded to free VRAM
-        # before Stage 2. Stages 2 and 3 are API-only and need no GPU memory.
-        print("[Stage 1 / Recaptioning] Loading Moondream2 ...")
-        appraiser = MoondreamAppraiser()
-        appraisal = appraiser.appraise(img_a, img_b)
-
-        print("[Stage 1] Unloading Moondream2 to free VRAM ...")
-        appraiser.unload()
-        del appraiser
+        # SpriteAppraiser loads SigLIP then Moondream2 in sequence and unloads each
+        # to free VRAM before Stage 2. Stages 2 and 3 are API-only (no GPU). The
+        # appraiser upscales the tiny sprite with LANCZOS internally for perception.
+        print("[Stage 1 / Recaptioning] Appraising sprites (SigLIP identity + Moondream appearance) ...")
+        appraisal = SpriteAppraiser().appraise(raw_a, raw_b)
 
         # ------------------------------------------------------------------
         # Stage 2 — CoT Material Planning (Master Smith via Google ADK)
@@ -160,12 +156,12 @@ class Forge:
         # (e.g. Replicate flux-canny-dev). Currently unused by _forge().
         forged = self._forge(prompt, structure_source=structure_source)
 
-        preview_a = img_a.resize((UI_PREVIEW_SIZE, UI_PREVIEW_SIZE), Image.NEAREST)
-        preview_b = img_b.resize((UI_PREVIEW_SIZE, UI_PREVIEW_SIZE), Image.NEAREST)
+        preview_a = raw_a.convert("RGB").resize((UI_PREVIEW_SIZE, UI_PREVIEW_SIZE), Image.NEAREST)
+        preview_b = raw_b.convert("RGB").resize((UI_PREVIEW_SIZE, UI_PREVIEW_SIZE), Image.NEAREST)
 
         return preview_a, preview_b, forged, {
-            "item_a": appraisal.get("item_a", {}).get("description", ""),
-            "item_b": appraisal.get("item_b", {}).get("description", ""),
+            "item_a": _describe_item(appraisal.get("item_a", {})),
+            "item_b": _describe_item(appraisal.get("item_b", {})),
             "fused_name": fused_name,
             "reasoning": smithing.get("reasoning", ""),
             "archetype": archetype,
@@ -282,6 +278,14 @@ def _assemble_prompt(archetype: str, parts: list, *, fallback: str = "") -> str:
     return f"{PIXEL_ART_PREFIX}{body}, {PIXEL_ART_SUFFIX}"
 
 
+def _describe_item(item: dict) -> str:
+    """One-line 'type — appearance' summary for metadata / UI titles."""
+    item = item or {}
+    type_ = (item.get("type", "") or "").strip()
+    desc = (item.get("description", "") or "").strip()
+    return f"{type_} — {desc}" if type_ and desc else (type_ or desc)
+
+
 def _format_appraisal(appraisal: dict) -> str:
     """Render the structured appraisal dict into a clean text block for the
     Master Smith instruction (ADK string-templates session state into `{appraisal}`)."""
@@ -289,8 +293,8 @@ def _format_appraisal(appraisal: dict) -> str:
     for label, key in (("A", "item_a"), ("B", "item_b")):
         item = appraisal.get(key, {}) or {}
         lines.append(f"ITEM {label}:")
-        lines.append(f"  identity: {item.get('description', '').strip()}")
-        lines.append(f"  visible parts: {item.get('parts', '').strip()}")
+        lines.append(f"  type: {item.get('type', '').strip()}")
+        lines.append(f"  appearance: {item.get('description', '').strip()}")
     return "\n".join(lines)
 
 
