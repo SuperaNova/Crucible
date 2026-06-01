@@ -38,13 +38,20 @@ from transformers import AutoModelForCausalLM
 _MODEL_ID = "vikhyatk/moondream2"
 _REVISION = "2025-06-21"
 
-# VQA prompt — Moondream2 supports full instruction-following so we can be
-# specific about what we want. The 'short caption' mode gives us a concise
-# one-liner, which is ideal for feeding into the Master Smith prompt.
-_APPRAISAL_PROMPT = (
+# Directed VQA prompts. Moondream2 supports full instruction-following, so the
+# Appraiser asks two targeted questions per sprite to give the Master Smith dense,
+# part-level grounding rather than a single vague caption. Moondream stays in
+# natural language (it is unreliable at strict JSON); the structured decomposition
+# into a part blueprint is the LLM Smith's job downstream.
+_IDENTITY_PROMPT = (
     "You are an RPG item cataloguer. This is a pixel art icon of a fantasy item. "
     "State what the item is (e.g. 'iron sword', 'wooden shield', 'health potion'), "
-    "then briefly describe its material, color, and style. One short sentence only."
+    "then briefly describe its material and dominant colors. One short sentence only."
+)
+_PARTS_PROMPT = (
+    "This is a pixel art icon of a fantasy item. List its distinct visible physical "
+    "parts as a short comma-separated list (e.g. 'blade, crossguard, grip, pommel'). "
+    "If it is a single solid object with no separate parts, answer 'whole'."
 )
 
 
@@ -81,42 +88,72 @@ class MoondreamAppraiser:
 
         print("[MoondreamAppraiser] Model loaded.")
 
+    def unload(self) -> None:
+        """
+        Release the model from GPU memory and clear the CUDA cache.
+
+        Call this after appraise() returns if VRAM is needed for subsequent
+        pipeline stages. After calling unload(), this instance must not be
+        used again — create a new MoondreamAppraiser for the next run.
+        """
+        if hasattr(self, "_model") and self._model is not None:
+            del self._model
+            self._model = None
+            if self._device == "cuda":
+                import torch as _torch
+                _torch.cuda.empty_cache()
+            print("[MoondreamAppraiser] Model unloaded, VRAM released.")
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def appraise(self, img_a: Image.Image, img_b: Image.Image) -> dict:
         """
-        Caption both sprites and return an appraisal dict compatible with
-        the session-state schema expected by the Master Smith.
+        Appraise both sprites and return a structured per-item dict for the
+        Master Smith to ground its part-level material blueprint on.
 
         Args:
             img_a: PIL Image for sprite A.
             img_b: PIL Image for sprite B.
 
         Returns:
-            dict with keys: item_a, item_b, item_a_tags, item_b_tags
+            dict of the form::
+
+                {
+                    "item_a": {"description": str, "parts": str, "tags": [str, ...]},
+                    "item_b": {"description": str, "parts": str, "tags": [str, ...]},
+                }
         """
-        caption_a = self._caption(img_a)
-        caption_b = self._caption(img_b)
-
-        print(f"[MoondreamAppraiser] Item A: {caption_a}")
-        print(f"[MoondreamAppraiser] Item B: {caption_b}")
-
-        return {
-            "item_a": caption_a,
-            "item_b": caption_b,
-            "item_a_tags": _extract_tags(caption_a),
-            "item_b_tags": _extract_tags(caption_b),
-        }
+        item_a = self._appraise_one(img_a, "A")
+        item_b = self._appraise_one(img_b, "B")
+        return {"item_a": item_a, "item_b": item_b}
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _caption(self, img: Image.Image) -> str:
+    def _appraise_one(self, img: Image.Image, label: str) -> dict:
         """
-        Run a directed VQA query on a single PIL image using Moondream2.
+        Run two directed VQA queries on a single sprite: one for identity +
+        material + colours, one for its visible parts. Returns a structured
+        per-item appraisal dict.
+        """
+        description = self._query(img, _IDENTITY_PROMPT)
+        parts = self._query(img, _PARTS_PROMPT)
+
+        print(f"[MoondreamAppraiser] Item {label}: {description}")
+        print(f"[MoondreamAppraiser] Item {label} parts: {parts}")
+
+        return {
+            "description": description,
+            "parts": parts,
+            "tags": _extract_tags(description),
+        }
+
+    def _query(self, img: Image.Image, prompt: str) -> str:
+        """
+        Run a single directed VQA query on a PIL image using Moondream2.
 
         Moondream2 internally encodes the image into its latent embedding
         (Encoder step) then decodes the latent conditioned on the prompt
@@ -125,7 +162,7 @@ class MoondreamAppraiser:
         img_rgb = img.convert("RGB")
 
         with torch.no_grad():
-            answer: str = self._model.query(img_rgb, _APPRAISAL_PROMPT)["answer"]
+            answer: str = self._model.query(img_rgb, prompt)["answer"]
 
         return answer.strip()
 

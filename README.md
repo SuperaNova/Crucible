@@ -1,49 +1,56 @@
 # Crucible: Autonomous Sprite Synthesis Pipeline
 *(Intelligent Systems / CS346 Mini-Project)*
 
-Crucible is a Multi-Agent System (MAS) that uses advanced generative models to autonomously "fuse" two 2D pixel art RPG items into a completely new, technically coherent artifact. Instead of mathematically averaging pixels (which produces blurry artifacts), Crucible uses a **semantic fusion** approach: it uses AI to "see" the items, a second AI to "think" of a logical hybrid, and a third AI to "draw" the result.
+Crucible is a Multi-Agent System (MAS) that uses advanced generative models to autonomously "fuse" two 2D pixel art RPG items into a completely new, technically coherent artifact. Instead of mathematically averaging pixels (which produces blurry artifacts), Crucible uses a **semantic fusion** approach inspired by the **RPG framework** (Yang et al., ICML 2024 — *Mastering Text-to-Image Diffusion: Recaptioning, Planning, and Generating with Multimodal LLMs*).
+
+The RPG paper proposes using an MLLM as a global planner that decomposes a complex prompt into spatial sub-regions, giving each region a dense localized sub-prompt for complementary diffusion. Crucible maps that idea from *spatial regions* onto **item parts**: the LLM decomposes the fused item into named components (blade, grip, guard, gem, …) and assigns each one a concrete material recipe drawn from the two source sprites — e.g. "oak-wood grip, polished-gold blade" — acting as a *semantic material planner* rather than a spatial layout planner.
 
 ## I. Project Objective
 * **The Concept:** Crucible is designed as a prototype for an in-game crafting mechanic. In many RPGs, crafting systems are static—combining an Iron Ingot and a Stick always yields a generic Iron Sword. Crucible aims to show how generative AI can be embedded into a game engine to allow players to *actually* forge unique items on the fly, resulting in procedurally generated visual assets and lore that didn't exist in the game's original files.
-* **The Solution:** A hybrid Multi-Agent System that combines **Vision Autoencoders**, **Large Language Models (LLMs)**, and **Latent Diffusion Models**. This pipeline intelligently understands the *meaning* of base assets, reasons out a conceptual fusion, and generates high-fidelity pixel art.
+* **The Solution:** A hybrid Multi-Agent System that combines **Vision-Language Models**, **Large Language Models (LLMs)**, and **Latent Diffusion Models**, orchestrated by the **Google Agent Development Kit (ADK)** and structured around the three stages of the RPG framework.
 
 ---
 
 ## II. Component Models (The Three Pillars)
 
-To satisfy the requirements of combining modern AI architectures, Crucible is built upon three distinct neural methodologies:
+Crucible maps directly onto the three stages of the RPG framework, adapted from spatial scene generation to sprite composition:
 
-### 1. The Vision Autoencoder (Moondream2)
-* **Role:** The **Appraiser** Agent.
-* **Architecture:** Vision-Encoder-Decoder (Vision-Language Model).
+### Stage 1 — Recaptioning: The Vision Appraiser (Moondream2)
+* **RPG Role:** Recaptioning — the MLLM reads both source sprites and produces rich semantic descriptions, replacing the original paper's "complex prompt → sub-prompt decomposition" with "sprite → appraisal" for each input.
+* **Architecture:** Vision-Language Model (Encoder-Decoder).
 * **How it Works:**
-  * The **Encoder** (SigLIP Vision Transformer) compresses the high-dimensional input image (the sprite) into a low-dimensional, dense latent embedding space.
-  * The **Decoder** (Phi-based Causal Language Model) reconstructs that embedding—not back into pixels, but into a natural language representation (a text caption).
-* **Why it was chosen:** We utilize this as a Semantic Autoencoder. Moondream2 (1.8B parameters) was chosen because its training distribution included vast amounts of 2D digital art and game UI, making it highly accurate at reading stylized RPG icons. It fits comfortably within 6 GB VRAM in `float16`, making it viable on consumer hardware (e.g., GTX 1660 Super).
+  * The **Encoder** (SigLIP Vision Transformer) compresses the input sprite into a dense latent visual embedding.
+  * The **Decoder** (Phi-based Causal Language Model) decodes that embedding into natural language conditioned on a VQA prompt. The Appraiser runs **two directed queries per sprite** — one for identity + material + dominant colours, one for its visible parts — giving the Master Smith the part-level grounding it needs for material assignment.
+* **Why it was chosen:** Moondream2 (1.8B parameters) was chosen because its training distribution included 2D digital art and game assets, making it highly accurate at reading stylized RPG icons. It fits within 6 GB VRAM in `float16`. After Stage 1 completes, the model is **explicitly unloaded** from GPU to free VRAM for subsequent stages.
 
-### 2. The Reasoning Engine (Gemini 3.1 Flash Lite Preview)
-* **Role:** The **Master Smith** Agent.
+### Stage 2 — CoT Planning: The Master Smith (Gemini Flash Lite via Google ADK)
+* **RPG Role:** Multimodal Chain-of-Thought Planning — the MLLM acts as a global planner. In the original paper the LLM plans spatial bounding-box regions, each with a dense sub-prompt; here it plans a *part-level material blueprint* across the two sprites.
 * **Architecture:** Large Language Model (LLM).
-* **How it Works:** LLMs act as probabilistic engines trained to predict token sequences. In our system, Gemini acts as the "brain," performing zero-shot logical reasoning.
-* **Function in Pipeline:** It does not "see" the images directly. It ingests the text output from the Appraiser, cross-references its massive internal knowledge of metallurgy and fantasy lore, and outputs structured JSON containing the new item's name, its lore, and a visual synthesis prompt. Orchestrated via the **Google Agent Development Kit (ADK)**.
+* **How it Works:** Given the two Moondream2 appraisals, the Master Smith performs explicit four-step CoT reasoning:
+  1. **Archetype & skeleton** — picks the fused item's base form (`archetype`) and enumerates its canonical physical parts (e.g. a sword → blade, crossguard, grip, pommel).
+  2. **Part-by-part material assignment** — for *every* part emits a concrete `material`, `color`, `source` (A / B / fused), and a localized surface `detail`. This is the core of semantic material compositing — real choices like "blade=gold from B, grip=wood from A" rather than a muddy average.
+  3. **Structure source** — designates which sprite provides the primary visual skeleton (preserved for future ControlNet conditioning).
+  4. **Name & lore** — writes `fused_name` and `reasoning`.
+* **Structured output, not a prompt:** The Smith emits a structured `parts` list (validated by the `SmithingResult` schema) — it does **not** hand-write the diffusion prompt. The Forger assembles the prompt deterministically from the blueprint so every per-part material detail is guaranteed to reach the model.
+* **Why ADK:** The multi-step structured output and session-state handoff to the Forger justify ADK's orchestration layer here; the planning output is richer than a simple single-call LLM interaction.
 
-### 3. The Generative Foundation (Flux.1 via Pollinations)
-* **Role:** The **Forger** Agent.
+### Stage 3 — Generation: The Forger (Flux.1 via Pollinations)
+* **RPG Role:** Generation — the diffusion model manifests the fused sprite from the planner's output prompt. In the original paper this is Complementary Regional Diffusion; here it is a single high-quality Flux.1 call conditioned on the Master Smith's structured prompt.
 * **Architecture:** Latent Diffusion Model (Transformer-backed).
-* **How it Works:** Diffusion models are trained by adding Gaussian noise to an image (forward diffusion) and learning to predict and remove that noise (reverse diffusion/denoising).
-* **Function in Pipeline:** It takes the text prompt from the Master Smith and runs the reverse diffusion process on a random noise tensor to "manifest" the fused sprite. Flux was selected due to its superior text-adherence compared to older Convolutional U-Net models.
+* **How it Works:** The Forger first assembles the Master Smith's part blueprint into a single diffusion prompt deterministically — each part becomes a localized clause (`"blade made of polished gold (bright yellow), glowing runes along the edge"`) wrapped in the pixel-art style constraints — then Flux.1 runs reverse diffusion guided by that prompt. The `structure_source` field is preserved in metadata for future ControlNet-Canny conditioning (e.g. via Replicate `flux-canny-dev`) without requiring code refactoring.
+* **Why Pollinations/Flux.1:** Flux.1 provides state-of-the-art text adherence and image quality without requiring local GPU inference, which is critical given the 6 GB VRAM constraint already consumed by Moondream2.
 
 ---
 
 ## III. System Architecture: Multi-Agent Orchestration
 
-The handoff between these disparate models is managed by the **Google Agent Development Kit (ADK)**, creating a seamless, stateful Sequential Pipeline:
+The handoff between these disparate models is managed by the **Google Agent Development Kit (ADK)**, creating a stateful Sequential Pipeline that mirrors the three stages of the RPG framework:
 
-1. **Stage 1 (Appraiser):** `Input Image -> SigLIP Encoder -> Latent Embedding -> Phi Decoder -> Text Caption`
-2. **Stage 2 (Master Smith):** `Text Captions -> ADK Session State -> LLM Context Window -> Fused Prompt & Lore`
-3. **Stage 3 (Forger):** `Fused Prompt -> Flux Diffusion Model -> Denoised Tensor -> Output Sprite`
+1. **Stage 1 — Recaptioning (Appraiser):** `Input Sprites → SigLIP Encoder → Latent Embedding → Phi Decoder → Per-Item Appraisal (description + parts + tags)`
+2. **Stage 2 — CoT Planning (Master Smith):** `Appraisal → ADK Session State → LLM CoT Reasoning → Part-Level Material Blueprint + Archetype + Structure Source`
+3. **Stage 3 — Generation (Forger):** `Blueprint → Deterministic Prompt Assembly → Flux.1 Diffusion → Pixel Art Post-Processing → Output Sprite`
 
-This separation of concerns allows each model to specialize: Moondream2 for Vision, Gemini for Logic, and Flux for Art.
+The Master Smith's `parts` blueprint and `structure_source` outputs are the Crucible-specific adaptation of RPG's rationale + region-planning stage: the `parts` list maps RPG's per-region detail onto per-part material recipes. `structure_source` designates which sprite's silhouette provides the dominant visual skeleton — surfaced today in the UI, and reserved as the ControlNet structural reference for future image-conditioned generation.
 
 ---
 
@@ -62,13 +69,14 @@ We rely on the ["Pixel Art" dataset](https://www.kaggle.com/datasets/ebrahimelga
 ## V. Optimization & Safety
 
 ### Prompt Engineering & Domain Adaptation
-To force a modern Diffusion model (Flux) to render assets that look like retro SNES sprites, strict Domain Adaptation techniques are applied via Prompt Engineering:
-* **Style Prefixing & Suffixing:** Every prompt generated by the LLM is forcibly wrapped with strict stylistic constraints (e.g., `"pixel art sprite, 32x32 grid, RPG game item icon"`, `"hard pixel edges, no anti-aliasing, limited 16-color palette, retro SNES 16-bit style"`).
+To force a modern Diffusion model (Flux.1) to render assets that look like retro SNES sprites, strict Domain Adaptation techniques are applied during prompt assembly:
+* **Style Prefixing & Suffixing:** Every prompt is forcibly wrapped with strict stylistic constraints (`"pixel art sprite, 32x32 grid, RPG game item icon"` prefix; `"hard pixel edges, no anti-aliasing, limited 16-color palette, retro SNES 16-bit style"` suffix).
+* **Deterministic Blueprint Assembly:** Rather than trusting the LLM to free-write a faithful prompt, the Forger renders the Master Smith's structured `parts` list into the diffusion prompt in code — one localized clause per part (material + colour + surface detail) — so every per-part material choice is guaranteed to reach Flux.1.
 * **Hallucination Control:** The Moondream2 VLM is prompted with specific negative instructions to ensure the Master Smith receives clean, objective physical descriptions rather than brand names or game-specific lore.
 
 ### Key Parameters & Reproducibility
-* **Deterministic Forging:** The Pollinations Flux API is called with an explicit integer `seed`, enabling strict reproducibility when the same seed is reused or infinite variation by changing it.
-* **Quantization & Local Execution:** The Moondream2 Appraiser is loaded in `float16` precision to ensure it fits entirely within 6 GB VRAM on consumer-grade hardware without sacrificing accuracy.
+* **Random Seeds per Forge:** The Pollinations Flux.1 API is called with a freshly sampled random `seed` each run, allowing infinite variation of the same item fusion. Seeds are logged to the console for reproducibility.
+* **VRAM Management:** Moondream2 is loaded lazily at the start of each run and unloaded (with `torch.cuda.empty_cache()`) immediately after Stage 1. This keeps peak VRAM within the 6 GB budget of a GTX 1660 Super while Stages 2 and 3 use no GPU at all.
 * **Output Post-Processing:** The generated image is crushed to a `32x32` grid via `NEAREST` resampling, then scaled back up and quantized to 16 colors using Median-Cut, ensuring hard pixel edges throughout.
 
 ---
