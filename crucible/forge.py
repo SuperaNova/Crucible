@@ -183,8 +183,9 @@ class Forge:
         Args:
             image_prompt:     Full prompt string from the Master Smith.
             structure_source: Which sprite ('A' or 'B') is the structural anchor.
-                              Reserved for future ControlNet conditioning — currently
-                              unused (Pollinations is a text-only API).
+                              Unused here (Pollinations is a text-only API), but the
+                              Colab notebook has an optional SDXL + ControlNet-Canny
+                              cell that conditions generation on this sprite's silhouette.
         """
         seed = random.randint(0, 2**31 - 1)
         url = (
@@ -196,18 +197,7 @@ class Forge:
         response = requests.get(url, timeout=90)
         response.raise_for_status()
 
-        img = Image.open(io.BytesIO(response.content)).convert("RGB")
-        w, h = img.size
-        m = min(w, h)
-        img = img.crop(((w - m) // 2, (h - m) // 2, (w + m) // 2, (h + m) // 2))
-
-        result = (
-            img
-            .resize((PIXEL_GRID, PIXEL_GRID), Image.NEAREST)
-            .resize((UI_PREVIEW_SIZE, UI_PREVIEW_SIZE), Image.NEAREST)
-            .quantize(colors=PALETTE_COLORS, method=Image.Quantize.MEDIANCUT)
-            .convert("RGB")
-        )
+        result = pixelate_quantize(Image.open(io.BytesIO(response.content)))
         print(f"[Stage 3] Done. Output: {result.size}")
         return result
 
@@ -230,6 +220,40 @@ class Forge:
     @staticmethod
     def _to_pil(sprite) -> Image.Image:
         return Image.fromarray(sprite[..., :3].astype("uint8"))
+
+
+# ---------------------------------------------------------------------------
+# Pixel-art post-processing (the "Pixel-Lattice" layer)
+# ---------------------------------------------------------------------------
+
+def pixelate_quantize(
+    img: Image.Image,
+    *,
+    grid: int = PIXEL_GRID,
+    colors: int = PALETTE_COLORS,
+    size: int = UI_PREVIEW_SIZE,
+) -> Image.Image:
+    """Crush a diffusion output onto a hard pixel grid, then snap to a limited palette.
+
+    Pixelate first (centre-crop to square, downsample to ``grid`` with NEAREST so
+    gradients are destroyed, scale back up to ``size`` with NEAREST), THEN quantize
+    to ``colors`` via median-cut — so the palette snaps to the already-hard pixel
+    edges rather than muddy intermediate colours.
+
+    Shared by the Pollinations/Flux Forger and the notebook's ControlNet path so
+    both produce identically post-processed sprites.
+    """
+    img = img.convert("RGB")
+    w, h = img.size
+    m = min(w, h)
+    img = img.crop(((w - m) // 2, (h - m) // 2, (w + m) // 2, (h + m) // 2))
+    return (
+        img
+        .resize((grid, grid), Image.NEAREST)
+        .resize((size, size), Image.NEAREST)
+        .quantize(colors=colors, method=Image.Quantize.MEDIANCUT)
+        .convert("RGB")
+    )
 
 
 # ---------------------------------------------------------------------------

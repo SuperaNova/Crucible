@@ -27,7 +27,7 @@ Crucible maps directly onto the three stages of the RPG framework, adapted from 
 ### Stage 2 — CoT Planning: The Master Smith (Gemini Flash Lite via Google ADK)
 * **RPG Role:** Multimodal Chain-of-Thought Planning — the MLLM acts as a global planner. In the original paper the LLM plans spatial bounding-box regions, each with a dense sub-prompt; here it plans a *part-level material blueprint* across the two sprites.
 * **Architecture:** Large Language Model (LLM).
-* **How it Works:** Given the two Moondream2 appraisals, the Master Smith performs explicit four-step CoT reasoning:
+* **How it Works:** Given each item's classified `type` (from SigLIP) and appearance description (from Moondream2), the Master Smith performs explicit four-step CoT reasoning:
   1. **Archetype & skeleton** — picks the fused item's base form (`archetype`) and enumerates its canonical physical parts (e.g. a sword → blade, crossguard, grip, pommel).
   2. **Part-by-part material assignment** — for *every* part emits a concrete `material`, `color`, `source` (A / B / fused), and a localized surface `detail`. This is the core of semantic material compositing — real choices like "blade=gold from B, grip=wood from A" rather than a muddy average.
   3. **Structure source** — designates which sprite provides the primary visual skeleton (preserved for future ControlNet conditioning).
@@ -38,8 +38,9 @@ Crucible maps directly onto the three stages of the RPG framework, adapted from 
 ### Stage 3 — Generation: The Forger (Flux.1 via Pollinations)
 * **RPG Role:** Generation — the diffusion model manifests the fused sprite from the planner's output prompt. In the original paper this is Complementary Regional Diffusion; here it is a single high-quality Flux.1 call conditioned on the Master Smith's structured prompt.
 * **Architecture:** Latent Diffusion Model (Transformer-backed).
-* **How it Works:** The Forger first assembles the Master Smith's part blueprint into a single diffusion prompt deterministically — each part becomes a localized clause (`"blade made of polished gold (bright yellow), glowing runes along the edge"`) wrapped in the pixel-art style constraints — then Flux.1 runs reverse diffusion guided by that prompt. The `structure_source` field is preserved in metadata for future ControlNet-Canny conditioning (e.g. via Replicate `flux-canny-dev`) without requiring code refactoring.
-* **Why Pollinations/Flux.1:** Flux.1 provides state-of-the-art text adherence and image quality without requiring local GPU inference, which is critical given the 6 GB VRAM constraint already consumed by Moondream2.
+* **How it Works:** The Forger first assembles the Master Smith's part blueprint into a single diffusion prompt deterministically — each part becomes a localized clause (`"blade made of polished gold (bright yellow), glowing runes along the edge"`) wrapped in the pixel-art style constraints — then Flux.1 runs reverse diffusion guided by that prompt.
+* **Structural conditioning (ControlNet):** The default text-only path ignores `structure_source`. The Colab notebook includes an optional **SDXL + ControlNet-Canny** cell that builds a Canny edge map from the `structure_source` sprite and conditions generation on it, so the fused item follows that silhouette — shown side-by-side with the text-only output. (Kept notebook-side; Flux + ControlNet won't fit the 6 GB local budget.)
+* **Why Pollinations/Flux.1:** Flux.1 provides state-of-the-art text adherence and image quality without requiring a heavy local diffusion model — keeping the local GPU footprint to just the lightweight Stage-1 vision models (and they are already unloaded by the time Stage 3 runs).
 
 ---
 
@@ -58,11 +59,11 @@ The Master Smith's `parts` blueprint and `structure_source` outputs are the Cruc
 ## IV. Data Methodology & Representation
 
 ### Sprite Representation
-Sprites are represented as `32x32` or `64x64` RGBA tensors. Before generation is finalized, the system applies hard-edge quantization and `NEAREST` neighbor downsampling to ensure the output snaps to a strict pixel grid rather than outputting blurry digital paintings.
+Sprites are stored as `16x16` RGB tensors (`uint8`, array shape `(N, 16, 16, 3)`). Because the source art is tiny, the Stage-1 vision models receive a smooth **LANCZOS** upscale, while the *final generated output* is crushed back to a hard `32x32` pixel grid via `NEAREST` resampling and 16-colour quantization — so it snaps to a strict pixel grid rather than a blurry digital painting.
 
 ### Dataset Filtering (The Smelter)
-We rely on the ["Pixel Art" dataset](https://www.kaggle.com/datasets/ebrahimelgazar/pixel-art) from Kaggle (~1,400 sprites). To prevent "garbage in, garbage out" (GIGO) in the generative models, a preprocessing heuristic script called the **Smelter** was built.
-* **Filtering Criteria:** It automatically purges sprites that are too small, have messy alpha channel transparency, or lack sufficient color variance. Only structurally sound sprites are allowed into the Appraiser's context window.
+We rely on the ["Pixel Art" dataset](https://www.kaggle.com/datasets/ebrahimelgazar/pixel-art) from Kaggle (~89,400 raw `16x16` sprites). To prevent "garbage in, garbage out" (GIGO) in the generative models, a preprocessing heuristic script called the **Smelter** filters this down to ~1,460 structurally sound sprites.
+* **Filtering Criteria:** It rejects near-monochrome sprites (low RGB standard deviation), sprites with too few distinct colour buckets, and washed-out / low-saturation sprites.
 * **Deduplication:** Exact duplicates are removed via MD5 hashing of raw pixel bytes.
 
 ---
@@ -73,11 +74,11 @@ We rely on the ["Pixel Art" dataset](https://www.kaggle.com/datasets/ebrahimelga
 To force a modern Diffusion model (Flux.1) to render assets that look like retro SNES sprites, strict Domain Adaptation techniques are applied during prompt assembly:
 * **Style Prefixing & Suffixing:** Every prompt is forcibly wrapped with strict stylistic constraints (`"pixel art sprite, 32x32 grid, RPG game item icon"` prefix; `"hard pixel edges, no anti-aliasing, limited 16-color palette, retro SNES 16-bit style"` suffix).
 * **Deterministic Blueprint Assembly:** Rather than trusting the LLM to free-write a faithful prompt, the Forger renders the Master Smith's structured `parts` list into the diffusion prompt in code — one localized clause per part (material + colour + surface detail) — so every per-part material choice is guaranteed to reach Flux.1.
-* **Hallucination Control:** The Moondream2 VLM is prompted with specific negative instructions to ensure the Master Smith receives clean, objective physical descriptions rather than brand names or game-specific lore.
+* **Hallucination Control:** Moondream2 is asked for *appearance only* and explicitly told **not** to name the item or list parts — identity comes from the SigLIP classifier instead. This removes the two failure modes we observed: mislabelled items and parroted part lists driving a wrong archetype.
 
 ### Key Parameters & Reproducibility
 * **Random Seeds per Forge:** The Pollinations Flux.1 API is called with a freshly sampled random `seed` each run, allowing infinite variation of the same item fusion. Seeds are logged to the console for reproducibility.
-* **VRAM Management:** Moondream2 is loaded lazily at the start of each run and unloaded (with `torch.cuda.empty_cache()`) immediately after Stage 1. This keeps peak VRAM within the 6 GB budget of a GTX 1660 Super while Stages 2 and 3 use no GPU at all.
+* **VRAM Management:** The two local vision models (SigLIP SO400M, then Moondream2) are loaded lazily and unloaded **in sequence** with `torch.cuda.empty_cache()` during Stage 1. This keeps peak VRAM ~3.5 GB — within the 6 GB budget of a GTX 1660 Super — while Stages 2 and 3 use no GPU at all.
 * **Output Post-Processing:** The generated image is crushed to a `32x32` grid via `NEAREST` resampling, then scaled back up and quantized to 16 colors using Median-Cut, ensuring hard pixel edges throughout.
 
 ---
@@ -86,7 +87,7 @@ To force a modern Diffusion model (Flux.1) to render assets that look like retro
 
 ### Prerequisites
 * Python 3.10+
-* A CUDA-capable GPU is strongly recommended (Moondream2 runs on CPU but is significantly slower)
+* A CUDA-capable GPU is strongly recommended (the SigLIP + Moondream2 vision models run on CPU but are significantly slower)
 * A [Kaggle API token](https://www.kaggle.com/settings) for dataset download
 * A [Google AI Studio API key](https://aistudio.google.com/app/apikey) for the Gemini agent
 
@@ -136,5 +137,6 @@ Crucible/
 │   ├── pixel_art/                # Raw Kaggle dataset (downloaded by setup.py)
 │   └── sprites_clean.npy         # Filtered sprite array (produced by setup.py)
 └── notebooks/
+    ├── crucible.ipynb            # Colab T4 end-to-end test harness (clones + runs the package)
     └── rpg_items.ipynb           # Exploratory data analysis notebook
 ```
