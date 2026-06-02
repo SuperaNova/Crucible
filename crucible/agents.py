@@ -1,9 +1,9 @@
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.genai import types
 
-from .schemas import AppraisalResult, SmithingResult
+from .schemas import SmithingResult
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.1-flash-lite"
 
 PIXEL_ART_PREFIX = "pixel art sprite, 32x32 grid, RPG game item icon, "
 PIXEL_ART_SUFFIX = (
@@ -13,46 +13,74 @@ PIXEL_ART_SUFFIX = (
     "no photorealism, no painterly style"
 )
 
-_appraiser = LlmAgent(
-    name="appraiser",
-    model=MODEL,
-    instruction=(
-        "You are an expert RPG item cataloguer. You are shown two pixel art "
-        "item sprites from a retro RPG game. The FIRST image is Item A and "
-        "the SECOND image is Item B.\n\n"
-        "For each sprite identify:\n"
-        "  - item_a / item_b: short common name (e.g. 'iron sword')\n"
-        "  - item_a_tags / item_b_tags: 3 to 5 descriptive tags about "
-        "material, element, or visual style (e.g. ['metal', 'blue', 'flame'])"
-    ),
-    output_schema=AppraisalResult,
-    output_key="appraisal",
-    generate_content_config=types.GenerateContentConfig(temperature=0.3),
-)
+# ---------------------------------------------------------------------------
+# Agent 2 — The Master Smith  (RPG Stage 2: CoT Material Planning)
+# ---------------------------------------------------------------------------
+#
+# This agent mirrors the "Multimodal Chain-of-Thought Planning" stage of the
+# RPG framework (Yang et al., ICML 2024). In the original paper the MLLM acts
+# as a *spatial* planner — decomposing a complex prompt into bounding-box
+# regions, each given a dense localized sub-prompt. Crucible maps that idea
+# from spatial regions onto the *parts of an item*: the Smith decomposes the
+# fused item into named components (blade, grip, guard, gem, ...) and gives
+# each one a concrete material recipe inherited from the two source sprites —
+# e.g. "oak-wood grip, polished-gold blade". This part-level blueprint is the
+# Crucible analogue of RPG's region-wise detailed recaption.
+#
+# The Smith does NOT write the diffusion prompt — it emits the structured
+# `parts` list and the Forger assembles the prompt deterministically, so the
+# localized material detail is guaranteed to survive into generation.
+#
+# The agent reads exclusively from ADK session state (include_contents="none")
+# so that the appraisal is the sole grounding signal — no free-form chat
+# history contaminates the reasoning.
 
 _master_smith = LlmAgent(
     name="master_smith",
     model=MODEL,
     instruction=(
-        "You are a master blacksmith and RPG item designer. "
-        "Two items are being fused in the Crucible.\n\n"
-        "Appraisal: {appraisal}\n"
-        "Style modifier: {style_modifier}\n\n"
-        "Design the fusion:\n"
-        "  1. fused_name: a creative thematic name.\n"
-        "  2. reasoning: one or two sentences of in-world lore.\n"
-        f"  3. image_prompt: must begin with '{PIXEL_ART_PREFIX}', "
-        "describe exact colors and shapes, "
-        f"and must end with '{PIXEL_ART_SUFFIX}'.\n"
-        "No photorealistic, painterly, or 3D style words."
+        "You are a master blacksmith and RPG item designer operating inside "
+        "the Crucible fusion pipeline.\n\n"
+        "Two pixel art items (A and B) are being fused. A Vision-Language Model "
+        "(Moondream2) has appraised them:\n\n"
+        "{appraisal}\n\n"
+        "Design the fused item as a concrete, part-by-part material blueprint. "
+        "Think carefully through four steps:\n\n"
+        "STEP 1 — ARCHETYPE & SKELETON\n"
+        "Each item's TYPE (from a zero-shot classifier) and appearance are given above; "
+        "trust the TYPE for what each item actually is. Decide the fused item's base "
+        "form (`archetype`) — usually the more equipment-like / structurally dominant "
+        "of the two types (e.g. fusing a 'gem' and an 'axe' yields a gem-encrusted axe; "
+        "fusing two blades yields a sword). Then enumerate that archetype's canonical "
+        "physical parts yourself (e.g. a sword -> blade, crossguard, grip, pommel; a "
+        "gem -> facets, setting). Set `archetype` to a short noun phrase (e.g. "
+        "'longsword', 'jewelled axe').\n\n"
+        "STEP 2 — PART-BY-PART MATERIAL ASSIGNMENT\n"
+        "For EVERY part, output one entry in `parts` with concrete, physical values:\n"
+        "  - `part`     : the component name (e.g. 'blade').\n"
+        "  - `material` : a specific material (e.g. 'polished gold', 'oak wood', "
+        "'blue crystal') — NOT a vague blend word.\n"
+        "  - `color`    : the dominant colour of that part (e.g. 'bright yellow').\n"
+        "  - `source`   : 'A' or 'B' if that part's look comes from one source item, "
+        "or 'fused' if it genuinely blends both.\n"
+        "  - `detail`   : one concrete localized surface detail (e.g. 'glowing runes "
+        "etched along the edge', 'leather wrap', 'faceted gem set in the center').\n"
+        "Make real choices — e.g. blade=steel from A, grip=wood from B — so the result "
+        "reads like 'wooden handle with a gold blade', not a muddy average.\n\n"
+        "STEP 3 — STRUCTURE SOURCE\n"
+        "Set `structure_source` to 'A' or 'B' — whichever item contributes the dominant "
+        "silhouette / shape skeleton of the fused result.\n\n"
+        "STEP 4 — NAME & LORE\n"
+        "Write `fused_name` (a creative thematic name) and `reasoning` (one or two "
+        "sentences of in-world lore explaining how the two items combined)."
     ),
     output_schema=SmithingResult,
     output_key="smithing",
     include_contents="none",
-    generate_content_config=types.GenerateContentConfig(temperature=0.75),
+    generate_content_config=types.GenerateContentConfig(temperature=0.7),
 )
 
 _pipeline = SequentialAgent(
     name="crucible_pipeline",
-    sub_agents=[_appraiser, _master_smith],
+    sub_agents=[_master_smith],
 )

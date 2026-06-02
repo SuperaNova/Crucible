@@ -49,6 +49,31 @@ except EnvironmentError as e:
 # Helper functions
 # ---------------------------------------------------------------------------
 
+def _format_blueprint(meta: dict) -> str:
+    """Render the Master Smith's part-level material blueprint as a markdown table."""
+    archetype = meta.get("archetype", "")
+    structure_src = meta.get("structure_source", "")
+    parts = meta.get("parts", []) or []
+
+    header = (
+        f"**Archetype:** {archetype} &nbsp;·&nbsp; "
+        f"**Structure anchor:** Item {structure_src}\n\n"
+    )
+    if not parts:
+        return header + "_No part blueprint returned._"
+
+    rows = [
+        "| Part | Material | Color | From | Detail |",
+        "|------|----------|-------|------|--------|",
+    ]
+    for p in parts:
+        rows.append(
+            f"| {p.get('part', '')} | {p.get('material', '')} | "
+            f"{p.get('color', '')} | {p.get('source', '')} | {p.get('detail', '')} |"
+        )
+    return header + "\n".join(rows)
+
+
 def idx_to_pil(idx: int) -> Image.Image | None:
     """Return a 128x128 PIL preview for the sprite at the given index."""
     if len(sprites_clean) == 0:
@@ -59,36 +84,37 @@ def idx_to_pil(idx: int) -> Image.Image | None:
     )
 
 
-def run_forge(idx_a: int, idx_b: int, extra: str):
+def run_forge(idx_a: int, idx_b: int):
     """
     Gradio callback for the Forge button.
-    Runs the full three-agent pipeline and returns outputs for all UI components.
+    Runs the full three-stage RPG pipeline and returns outputs for all UI components.
     """
     if len(sprites_clean) == 0:
         error_msg = f"Cannot forge: {load_error}"
-        return None, None, None, error_msg
+        return None, None, None, error_msg, ""
 
     if forge_instance is None:
         error_msg = f"Cannot forge: {forge_error}"
-        return None, None, None, error_msg
+        return None, None, None, error_msg, ""
 
     sprite_a = sprites_clean[int(idx_a)]
     sprite_b = sprites_clean[int(idx_b)]
 
     try:
         preview_a, preview_b, forged, meta = forge_instance.quench(
-            sprite_a, sprite_b, extra
+            sprite_a, sprite_b
         )
         label = (
             f"## {meta['fused_name']}\n\n"
             f"{meta['reasoning']}"
         )
-        return preview_a, forged, preview_b, label
+        plan_text = _format_blueprint(meta)
+        return preview_a, forged, preview_b, label, plan_text
 
     except Exception as e:
         error_msg = f"Forge failed: {e}"
         print(f"[App] ERROR: {error_msg}")
-        return None, None, None, error_msg
+        return None, None, None, error_msg, ""
 
 
 # ---------------------------------------------------------------------------
@@ -165,12 +191,7 @@ def build_ui() -> gr.Blocks:
         idx_a.change(fn=idx_to_pil, inputs=idx_a, outputs=preview_a)
         idx_b.change(fn=idx_to_pil, inputs=idx_b, outputs=preview_b)
 
-        # Style modifier + forge button
-        extra = gr.Textbox(
-            value="legendary, glowing",
-            label="Style Modifier (optional)",
-            placeholder="e.g. cursed, elemental, ancient...",
-        )
+        # Forge button
         forge_btn = gr.Button(
             "Forge",
             variant="primary",
@@ -200,11 +221,16 @@ def build_ui() -> gr.Blocks:
         # Fusion label
         fusion_label = gr.Markdown(elem_id="fusion-label")
 
+        # Composition plan (Stage 2 CoT output)
+        composition_md = gr.Markdown(
+            elem_id="composition-plan",
+        )
+
         # Wire up Forge button
         forge_btn.click(
             fn=run_forge,
-            inputs=[idx_a, idx_b, extra],
-            outputs=[out_a, out_forged, out_b, fusion_label],
+            inputs=[idx_a, idx_b],
+            outputs=[out_a, out_forged, out_b, fusion_label, composition_md],
         )
 
         # Initialise previews on load

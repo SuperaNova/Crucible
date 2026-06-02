@@ -1,3 +1,4 @@
+﻿transformers==4.51.3
 google-genai
 google-adk
 gradio
@@ -6,3 +7,6 @@ numpy
 requests
 python-dotenv
 kaggle
+torch
+sentencepiece
+protobuf
