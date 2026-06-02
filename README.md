@@ -7,7 +7,7 @@ The RPG paper proposes using an MLLM as a global planner that decomposes a compl
 
 ## I. Project Objective
 * **The Concept:** Crucible is designed as a prototype for an in-game crafting mechanic. In many RPGs, crafting systems are static—combining an Iron Ingot and a Stick always yields a generic Iron Sword. Crucible aims to show how generative AI can be embedded into a game engine to allow players to *actually* forge unique items on the fly, resulting in procedurally generated visual assets and lore that didn't exist in the game's original files.
-* **The Solution:** A hybrid Multi-Agent System that combines **Vision-Language Models**, **Large Language Models (LLMs)**, and **Latent Diffusion Models**, orchestrated by the **Google Agent Development Kit (ADK)** and structured around the three stages of the RPG framework.
+* **The Solution:** A hybrid Multi-Agent System that combines **Vision-Language Models**, **Large Language Models (LLMs)**, and **Latent Diffusion Models** as a cooperative sequential pipeline — with the **Google Agent Development Kit (ADK)** driving the reasoning agent — structured around the three stages of the RPG framework. *(See the note on "agents" in §III.)*
 
 ---
 
@@ -25,12 +25,12 @@ Crucible maps directly onto the three stages of the RPG framework, adapted from 
 * **VRAM:** SigLIP SO400M (~1.7 GB) and Moondream2 (~3.5 GB) in `float16` are loaded and unloaded **in sequence**, so peak VRAM stays ~3.5 GB (within a 6 GB GTX 1660 Super budget) and is fully released before Stage 2.
 
 ### Stage 2 — CoT Planning: The Master Smith (Gemini Flash Lite via Google ADK)
-* **RPG Role:** Multimodal Chain-of-Thought Planning — the MLLM acts as a global planner. In the original paper the LLM plans spatial bounding-box regions, each with a dense sub-prompt; here it plans a *part-level material blueprint* across the two sprites.
+* **RPG Role:** Chain-of-Thought Planning — the LLM acts as a global planner. *(The original paper uses a multimodal LLM that sees the image; Crucible instead feeds the Smith the **text** appraisal from Stage 1, so this planner is text-only.)* In the paper the LLM plans spatial bounding-box regions, each with a dense sub-prompt; here it plans a *part-level material blueprint* across the two sprites.
 * **Architecture:** Large Language Model (LLM).
 * **How it Works:** Given each item's classified `type` (from SigLIP) and appearance description (from Moondream2), the Master Smith performs explicit four-step CoT reasoning:
   1. **Archetype & skeleton** — picks the fused item's base form (`archetype`) and enumerates its canonical physical parts (e.g. a sword → blade, crossguard, grip, pommel).
   2. **Part-by-part material assignment** — for *every* part emits a concrete `material`, `color`, `source` (A / B / fused), and a localized surface `detail`. This is the core of semantic material compositing — real choices like "blade=gold from B, grip=wood from A" rather than a muddy average.
-  3. **Structure source** — designates which sprite provides the primary visual skeleton (preserved for future ControlNet conditioning).
+  3. **Structure source** — designates which sprite provides the primary visual skeleton (used by the optional ControlNet cell in the notebook).
   4. **Name & lore** — writes `fused_name` and `reasoning`.
 * **Structured output, not a prompt:** The Smith emits a structured `parts` list (validated by the `SmithingResult` schema) — it does **not** hand-write the diffusion prompt. The Forger assembles the prompt deterministically from the blueprint so every per-part material detail is guaranteed to reach the model.
 * **Why ADK:** The multi-step structured output and session-state handoff to the Forger justify ADK's orchestration layer here; the planning output is richer than a simple single-call LLM interaction.
@@ -46,13 +46,17 @@ Crucible maps directly onto the three stages of the RPG framework, adapted from 
 
 ## III. System Architecture: Multi-Agent Orchestration
 
-The handoff between these disparate models is managed by the **Google Agent Development Kit (ADK)**, creating a stateful Sequential Pipeline that mirrors the three stages of the RPG framework:
+The three stages are coordinated by the `Forge` orchestrator as a **stateful sequential pipeline** that mirrors the RPG framework. **Google ADK** powers the reasoning agent (Stage 2): it runs the Master Smith as an `LlmAgent` with a structured `output_schema` and carries the appraisal → blueprint handoff through ADK **session state**. Stages 1 and 3 are invoked by the orchestrator directly.
+
+> **On "agents":** Crucible uses *agent* in the classical AI sense (Russell & Norvig — a unit that perceives its environment and acts on it in a specialized role), not in the narrow sense of every component running on an agent framework. The pipeline is a **cooperative, blackboard-style sequential MAS**: a perception agent (**Appraiser**), a deliberative planning agent (**Master Smith**), and an actuator agent (**Forger**), communicating through shared state. Only the Master Smith is a literal Google ADK `LlmAgent`; the Appraiser and Forger are role-defined agents in plain Python. There is no inter-agent negotiation, concurrency, or emergent behaviour — coordination is centralized and sequential.
+
+The pipeline, stage by stage:
 
 1. **Stage 1 — Recaptioning (Appraiser):** `Input Sprites → SigLIP Zero-Shot (item type) + Moondream2 (appearance) → Per-Item Appraisal (type + description + tags)`
 2. **Stage 2 — CoT Planning (Master Smith):** `Appraisal → ADK Session State → LLM CoT Reasoning → Part-Level Material Blueprint + Archetype + Structure Source`
 3. **Stage 3 — Generation (Forger):** `Blueprint → Deterministic Prompt Assembly → Flux.1 Diffusion → Pixel Art Post-Processing → Output Sprite`
 
-The Master Smith's `parts` blueprint and `structure_source` outputs are the Crucible-specific adaptation of RPG's rationale + region-planning stage: the `parts` list maps RPG's per-region detail onto per-part material recipes. `structure_source` designates which sprite's silhouette provides the dominant visual skeleton — surfaced today in the UI, and reserved as the ControlNet structural reference for future image-conditioned generation.
+The Master Smith's `parts` blueprint and `structure_source` outputs are the Crucible-specific adaptation of RPG's rationale + region-planning stage: the `parts` list maps RPG's per-region detail onto per-part material recipes. `structure_source` designates which sprite's silhouette provides the dominant visual skeleton — surfaced in the UI, and used as the ControlNet structural reference in the notebook's optional SDXL + ControlNet cell.
 
 ---
 
@@ -77,7 +81,7 @@ To force a modern Diffusion model (Flux.1) to render assets that look like retro
 * **Hallucination Control:** Moondream2 is asked for *appearance only* and explicitly told **not** to name the item or list parts — identity comes from the SigLIP classifier instead. This removes the two failure modes we observed: mislabelled items and parroted part lists driving a wrong archetype.
 
 ### Key Parameters & Reproducibility
-* **Random Seeds per Forge:** The Pollinations Flux.1 API is called with a freshly sampled random `seed` each run, allowing infinite variation of the same item fusion. Seeds are logged to the console for reproducibility.
+* **Random Seeds per Forge:** The Pollinations Flux.1 API is called with a freshly sampled random `seed` each run, allowing infinite variation of the same item fusion. Each run's seed is logged to the console for traceability.
 * **VRAM Management:** The two local vision models (SigLIP SO400M, then Moondream2) are loaded lazily and unloaded **in sequence** with `torch.cuda.empty_cache()` during Stage 1. This keeps peak VRAM ~3.5 GB — within the 6 GB budget of a GTX 1660 Super — while Stages 2 and 3 use no GPU at all.
 * **Output Post-Processing:** The generated image is crushed to a `32x32` grid via `NEAREST` resampling, then scaled back up and quantized to 16 colors using Median-Cut, ensuring hard pixel edges throughout.
 
